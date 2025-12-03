@@ -1,0 +1,1 @@
+from . import models # ensures models are registered
