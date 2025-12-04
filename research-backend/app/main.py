@@ -1,11 +1,14 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.core.db import init_db
+from app.core.config import settings
+
 
 from app.routers.auth import router as auth_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    print("GOOGLE_CLIENT_ID:", settings.GOOGLE_CLIENT_ID)
     init_db() # runs at startup
     yield
 
