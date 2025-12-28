@@ -5,6 +5,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./app.db"
     SECRET_KEY: str = "key"
     ALGORITHM: str = "HS256"
+
+    SPOILAGE_MODEL_PATH: str = "app/artifacts/spoilage_stage_classifier.keras"
+    SPOILAGE_META_PATH: str = "app/artifacts/spoilage_stage_classifier_meta.json"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7 
     GOOGLE_CLIENT_ID: str 

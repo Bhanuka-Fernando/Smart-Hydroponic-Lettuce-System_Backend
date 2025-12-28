@@ -1,0 +1,36 @@
+{
+  "class_names": [
+    "fresh",
+    "slightly_aged",
+    "near_spoilage",
+    "spoiled"
+  ],
+  "sensor_mean": [
+    6.81632661819458,
+    91.20574951171875
+  ],
+  "sensor_std": [
+    1.1800423860549927,
+    2.0351455211639404
+  ],
+  "img_size": [
+    224,
+    224
+  ],
+  "train_plants": [
+    0,
+    2,
+    6,
+    7,
+    8,
+    9
+  ],
+  "val_plants": [
+    3,
+    5
+  ],
+  "test_plants": [
+    1,
+    4
+  ]
+}
