@@ -4,6 +4,8 @@ python-multipart
 pydantic-settings
 python-jose[cryptography]
 numpy
-torch / torchvision
+torch
+torchvision
 opencv-python
 scikit-learn 
+joblib

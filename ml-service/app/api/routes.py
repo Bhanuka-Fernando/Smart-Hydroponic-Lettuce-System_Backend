@@ -9,11 +9,18 @@ from app.services.growth import predict_tomorrow
 router = APIRouter(prefix="/infer", tags=["inference"])
 
 @router.post("/today", response_model=InferResponse)
-async def infer_today(payload_json: str = Form(...), image: UploadFile = File(...), user=Depends(require_user)):
+async def infer_today(
+    payload_json: str = Form(...),
+    image: UploadFile = File(...),
+    depth: UploadFile = File(...),
+   # user=Depends(require_user),
+):
     payload = InferRequest.model_validate_json(payload_json)
-    img_bytes = await image.read()
+    rgb_bytes = await image.read()
+    depth_bytes = await depth.read()
 
-    A_proj_cm2, D_proj_cm = get_proj_area_and_diam(img_bytes)
+    A_proj_cm2, D_proj_cm, Z_m = get_proj_area_and_diam(rgb_bytes, depth_bytes)
+
     A_leaf_cm2 = leaf_area_from_proj(A_proj_cm2, D_proj_cm)
     W_today_g = predict_weight_g(A_leaf_cm2, D_proj_cm)
 
