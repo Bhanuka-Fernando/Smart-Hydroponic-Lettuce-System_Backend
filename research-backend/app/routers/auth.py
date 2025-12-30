@@ -37,7 +37,7 @@ def register_user(user_in: UserCreate, session: Session = Depends(get_session)):
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            details="Email is already registered.",
+            detail="Email is already registered.",
         )
     
     db_user = User(

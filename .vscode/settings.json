@@ -1,5 +1,8 @@
 {
     "python.analysis.extraPaths": [
         "/Users/bhanukafernando/Documents/Smart-Hydroponic-Lettuce-System_Backend/research-backend/.venv/lib/python3.12/site-packages"
+    ],
+    "cSpell.words": [
+        "DEEPLAB"
     ]
 }

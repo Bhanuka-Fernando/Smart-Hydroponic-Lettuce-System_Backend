@@ -210,3 +210,6 @@ __marimo__/
 # later things added
 .venv/
 .env
+*.pth
+*.pkl
+*.json

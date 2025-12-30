@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+pydantic-settings
+python-jose[cryptography]
+numpy
+torch / torchvision
+opencv-python
+scikit-learn 
