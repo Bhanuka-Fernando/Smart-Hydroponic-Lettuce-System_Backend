@@ -17,7 +17,7 @@ class InferRequest(BaseModel):
 class InferResponse(BaseModel):
     A_proj_cm2: float
     D_proj_cm: float
-    A_leaf_cm2: float
+    A_des_cm2: float
     W_today_g: float
     A_proj_tmr_cm2: float
     D_proj_tmr_cm: float

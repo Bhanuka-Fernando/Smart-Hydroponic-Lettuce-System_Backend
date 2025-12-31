@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from app.core.paths import SERVICE_DIR
 
 class Settings(BaseSettings):
     SECRET_KEY: str
@@ -11,6 +12,9 @@ class Settings(BaseSettings):
     USE_IMAGENET_NORM: bool = False 
 
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(SERVICE_DIR / ".env"), 
+        extra="ignore",
+    )
 
 settings = Settings()
