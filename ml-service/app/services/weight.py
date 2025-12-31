@@ -1,120 +1,114 @@
 # ml-service/app/services/weight.py
 
-from __future__ import annotations
-
+import math
+import re
 from functools import lru_cache
-from typing import Any, Dict, List
+from typing import Dict, Any, List, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 
 from app.core.paths import WEIGHT_BUNDLE
 
 
-class MLPRegressor(nn.Module):
-    def __init__(self, in_dim: int, hidden: List[int]):
+class WeightMLP(nn.Module):
+    """
+    Rebuild MLP from saved state_dict:
+      net = Sequential(Linear, ReLU, Linear, ReLU, Linear)
+    We build Linear sizes dynamically from the state_dict.
+    """
+    def __init__(self, linear_shapes: List[Tuple[int, int]]):
         super().__init__()
         layers: List[nn.Module] = []
-        prev = in_dim
-        for h in hidden:
-            layers.append(nn.Linear(prev, h))
-            layers.append(nn.ReLU())
-            prev = h
-        layers.append(nn.Linear(prev, 1))
+        for i, (in_f, out_f) in enumerate(linear_shapes):
+            layers.append(nn.Linear(in_f, out_f))
+            if i != len(linear_shapes) - 1:
+                layers.append(nn.ReLU())
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
 
-def _strip_module_prefix(sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    # handle DataParallel: "module.net.0.weight" -> "net.0.weight"
-    if any(k.startswith("module.") for k in sd.keys()):
-        return {k.replace("module.", "", 1): v for k, v in sd.items()}
-    return sd
-
-
-def _infer_hidden_from_state_dict(sd: Dict[str, torch.Tensor], in_dim: int) -> List[int]:
-    """
-    Infer hidden layer sizes from keys like:
-      net.0.weight: (H1, in_dim)
-      net.2.weight: (H2, H1)
-      net.4.weight: (1, H2)
-    => hidden = [H1, H2]
-    """
-    # collect linear layer indices from net.<idx>.weight
-    idxs = []
-    for k, v in sd.items():
-        if not (k.startswith("net.") and k.endswith(".weight")):
-            continue
-        parts = k.split(".")  # ["net", "<idx>", "weight"]
-        if len(parts) >= 3 and parts[1].isdigit():
-            idxs.append(int(parts[1]))
-
-    if not idxs:
-        raise RuntimeError("Cannot infer architecture: no 'net.<idx>.weight' keys found in state_dict")
-
-    idxs = sorted(idxs)
-
-    hidden: List[int] = []
-    # read weight shapes in order
-    for i, idx in enumerate(idxs):
-        w = sd[f"net.{idx}.weight"]
-        out_f, in_f = int(w.shape[0]), int(w.shape[1])
-
-        # sanity: first layer should take in_dim
-        if i == 0 and in_f != in_dim:
-            raise RuntimeError(f"in_dim mismatch: bundle says {in_dim}, but first layer expects {in_f}")
-
-        # last layer outputs 1 -> do not include as hidden
-        if out_f != 1:
-            hidden.append(out_f)
-
-    return hidden
-
-
 @lru_cache(maxsize=1)
 def _bundle() -> Dict[str, Any]:
     b = torch.load(WEIGHT_BUNDLE, map_location="cpu")
     if not isinstance(b, dict):
-        raise RuntimeError("weight_mlp_bundle.pt must be a dict")
+        raise RuntimeError("weight_mlp_bundle.pt must be a dict bundle.")
+    if "state_dict" not in b:
+        raise RuntimeError("weight_mlp_bundle.pt missing state_dict.")
     return b
+
+
+def _linear_shapes_from_state_dict(sd: Dict[str, torch.Tensor]) -> List[Tuple[int, int]]:
+    # expects keys like: net.0.weight, net.2.weight, net.4.weight
+    pat = re.compile(r"^net\.(\d+)\.weight$")
+    hits = []
+    for k, v in sd.items():
+        m = pat.match(k)
+        if m:
+            hits.append((int(m.group(1)), v))
+
+    if not hits:
+        raise RuntimeError("state_dict does not contain net.<i>.weight keys.")
+
+    hits.sort(key=lambda t: t[0])
+    shapes: List[Tuple[int, int]] = []
+    for _, w in hits:
+        out_f, in_f = w.shape  # Linear weight is (out, in)
+        shapes.append((in_f, out_f))
+    return shapes
 
 
 @lru_cache(maxsize=1)
 def _model() -> nn.Module:
     b = _bundle()
+    sd = b["state_dict"]
 
-    in_dim = int(b["in_dim"])
-    sd = b.get("state_dict")
-    if not isinstance(sd, dict):
-        raise RuntimeError("Bundle missing state_dict")
-
-    sd = _strip_module_prefix(sd)
-
-    # Infer hidden from checkpoint (most robust)
-    hidden = _infer_hidden_from_state_dict(sd, in_dim=in_dim)
-
-    m = MLPRegressor(in_dim=in_dim, hidden=hidden)
+    shapes = _linear_shapes_from_state_dict(sd)
+    m = WeightMLP(shapes)
     m.load_state_dict(sd, strict=True)
     m.eval()
     return m
 
 
+def _prepare_features(A_leaf_cm2: float, D_cm: float) -> torch.Tensor:
+    b = _bundle()
+    expects = b.get("expects", ["lnA_leaf_cm2", "lnD_cm"])
+
+    if A_leaf_cm2 <= 0 or D_cm <= 0:
+        return torch.tensor([[float("nan"), float("nan")]], dtype=torch.float32)
+
+    vals = []
+    for name in expects:
+        n = str(name).lower()
+
+        if ("lna" in n) or (("log" in n) and ("a" in n)):
+            vals.append(math.log(A_leaf_cm2))
+        elif ("lnd" in n) or (("log" in n) and ("d" in n)):
+            vals.append(math.log(D_cm))
+        elif n.startswith("a"):
+            vals.append(float(A_leaf_cm2))
+        elif n.startswith("d"):
+            vals.append(float(D_cm))
+        else:
+            raise RuntimeError(f"Unknown feature name in bundle expects: {name}")
+
+    return torch.tensor([vals], dtype=torch.float32)
+
+
 def predict_weight_g(A_leaf_cm2: float, D_cm: float) -> float:
     """
-    Bundle expects: lnA_leaf_cm2, lnD_cm
-    Bundle target : lnW
-    Return grams : exp(lnW)
+    Bundle target is lnW, so exp() -> grams.
     """
-    A = max(float(A_leaf_cm2), 1e-6)
-    D = max(float(D_cm), 1e-6)
-
-    x = np.array([[np.log(A), np.log(D)]], dtype=np.float32)
-    x_t = torch.from_numpy(x)
+    x = _prepare_features(A_leaf_cm2, D_cm)
+    if not torch.isfinite(x).all():
+        return 0.0
 
     with torch.no_grad():
-        lnW = _model()(x_t).cpu().numpy().reshape(-1)[0]
+        lnw = _model()(x).reshape(-1)[0].item()
 
-    return float(np.exp(lnW))
+    target = str(_bundle().get("target", "lnW")).lower()
+    if ("ln" in target) or ("log" in target):
+        return float(math.exp(lnw))
+    return float(lnw)
