@@ -10,9 +10,7 @@ class Sensors(BaseModel):
 class InferRequest(BaseModel):
     dap: int
     sensors: Sensors
-    # optional if your growth model needs them
-    deltaA_cm2: Optional[float] = 0.0
-    RGR: Optional[float] = 0.0
+    A_prev_cm2: Optional[float] = None  # yesterday projected area (from DB)
 
 class InferResponse(BaseModel):
     A_proj_cm2: float
@@ -22,3 +20,20 @@ class InferResponse(BaseModel):
     A_proj_tmr_cm2: float
     D_proj_tmr_cm: float
     W_tmr_g: float
+
+class ForecastRequest(BaseModel):
+    dap: int
+    n_days: int
+    A_prev_cm2: float
+    A_t_cm2: float
+    D_t_cm: float
+    sensors: Sensors
+
+class ForecastPoint(BaseModel):
+    step: int
+    DAP_pred: int
+    A_pred_cm2: float
+    D_pred_cm: float
+
+class ForecastResponse(BaseModel):
+    points: list[ForecastPoint]
