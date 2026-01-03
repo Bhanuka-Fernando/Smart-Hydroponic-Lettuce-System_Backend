@@ -37,3 +37,15 @@ class ForecastPoint(BaseModel):
 
 class ForecastResponse(BaseModel):
     points: list[ForecastPoint]
+
+
+class PanelTodayResponse(BaseModel):
+    Leaf_Area_today_cm2: float
+    Diameter_today_cm: float
+    Weight_today_g: float
+
+    Leaf_Area_tomorrow_cm2: float
+    Diameter_tomorrow_cm: float
+    Weight_tomorrow_g: float
+
+
