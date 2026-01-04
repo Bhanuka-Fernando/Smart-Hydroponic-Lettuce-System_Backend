@@ -103,9 +103,9 @@ async def panel_today(
         Diameter_today_cm=D_cm,
         Weight_today_g=W_today_g,
 
-        Leaf_Area_tomorrow_cm2=A_leaf_tmr_cm2,
-        Diameter_tomorrow_cm=D_tmr,
-        Weight_tomorrow_g=W_tmr_g,
+        Leaf_Area_tomorrow_cm2=0,
+        Diameter_tomorrow_cm=0,
+        Weight_tomorrow_g=0,
     )
 
 @router.post("/mask/applied")
