@@ -6,6 +6,9 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "change_me"
     JWT_ALGORITHM: str = "HS256"
 
+    AUTH_ENABLED: bool = False
+
+
     STAGE_MODEL_PATH: str = "artifacts/spoilage_stage_classifier.keras"
     STAGE_META_PATH: str = "artifacts/spoilage_stage_classifier_meta.json"
 

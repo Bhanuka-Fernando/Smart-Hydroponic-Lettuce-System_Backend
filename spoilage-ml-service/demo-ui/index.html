@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Spoilage ML Demo</title>
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --text:#0f172a;
+      --muted:#475569;
+      --border:#e2e8f0;
+      --green:#16a34a;
+      --amber:#f59e0b;
+      --red:#ef4444;
+      --blue:#2563eb;
+      --pill:#0b1220;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background:var(--bg);
+      color:var(--text);
+    }
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    .topbar{
+      display:flex;gap:12px;align-items:center;justify-content:space-between;
+      margin-bottom:16px;
+    }
+    .title{
+      display:flex;flex-direction:column;gap:2px;
+    }
+    .title h1{margin:0;font-size:20px;letter-spacing:.2px}
+    .title p{margin:0;color:var(--muted);font-size:13px}
+    .grid{
+      display:grid;
+      grid-template-columns: 1.1fr .9fr;
+      gap:16px;
+    }
+    @media (max-width: 900px){
+      .grid{grid-template-columns:1fr}
+    }
+    .card{
+      background:var(--card);
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:16px;
+      box-shadow: 0 6px 18px rgba(2,6,23,.06);
+    }
+    .card h2{margin:0 0 12px;font-size:14px;color:#0b1220}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+    @media (max-width: 520px){
+      .row,.row3{grid-template-columns:1fr}
+    }
+    label{display:block;font-size:12px;color:var(--muted);margin:0 0 6px}
+    input, textarea, select{
+      width:100%;
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:10px 12px;
+      font-size:14px;
+      outline:none;
+      background:#fff;
+    }
+    input:focus, textarea:focus{border-color:#94a3b8}
+    .hint{font-size:12px;color:var(--muted);margin-top:6px}
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;
+      border:0;border-radius:12px;
+      padding:10px 14px;font-weight:600;
+      cursor:pointer;
+      background:var(--blue);color:white;
+      transition:.15s transform ease;
+      width:100%;
+    }
+    .btn:active{transform:scale(.99)}
+    .btn.secondary{background:#0b1220}
+    .btnline{display:flex;gap:10px}
+    .btnline .btn{width:auto;flex:1}
+    .results{
+      display:grid;grid-template-columns:1fr 1fr 1fr;
+      gap:12px;margin-top:12px;
+    }
+    @media (max-width: 520px){.results{grid-template-columns:1fr}}
+    .stat{
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:12px;
+      background:#fff;
+    }
+    .stat .k{font-size:12px;color:var(--muted)}
+    .stat .v{font-size:20px;font-weight:800;margin-top:2px}
+    .badge{
+      display:inline-flex;align-items:center;gap:6px;
+      padding:6px 10px;border-radius:999px;
+      font-weight:700;font-size:12px;color:white;
+      background:var(--pill);
+      width:fit-content;
+    }
+    .badge.green{background:var(--green)}
+    .badge.amber{background:var(--amber)}
+    .badge.red{background:var(--red)}
+    .prob{
+      margin-top:12px;
+      border:1px solid var(--border);
+      border-radius:14px;
+      padding:12px;
+    }
+    .prob h3{margin:0 0 8px;font-size:13px}
+    .bar{
+      display:grid;grid-template-columns:120px 1fr 52px;
+      gap:10px;align-items:center;margin:8px 0;
+      font-size:13px;color:#0b1220;
+    }
+    .track{height:10px;background:#eef2ff;border-radius:999px;overflow:hidden;border:1px solid #e5e7eb}
+    .fill{height:100%;background:var(--blue);width:0%}
+    .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size:12px;
+      background:#0b1220;color:#e2e8f0;
+      border-radius:14px;
+      padding:12px;
+      white-space:pre-wrap;
+      word-break:break-word;
+      display:none;
+      margin-top:10px;
+    }
+    .preview{
+      margin-top:12px;
+      border:1px dashed #cbd5e1;
+      border-radius:14px;
+      padding:12px;
+      background:#fff;
+    }
+    .preview img{
+      width:100%;
+      border-radius:12px;
+      display:block;
+      max-height:320px;
+      object-fit:contain;
+      background:#f1f5f9;
+    }
+    .small{font-size:12px;color:var(--muted)}
+    .err{
+      margin-top:10px;
+      border:1px solid #fecaca;
+      background:#fff1f2;
+      color:#991b1b;
+      border-radius:12px;
+      padding:10px 12px;
+      display:none;
+      font-size:13px;
+    }
+    .ok{
+      margin-top:10px;
+      border:1px solid #bbf7d0;
+      background:#f0fdf4;
+      color:#14532d;
+      border-radius:12px;
+      padding:10px 12px;
+      display:none;
+      font-size:13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="title">
+        <h1>Spoilage ML Inference Demo</h1>
+        <p>Image + Temperature/Humidity → Stage + Remaining Days + Alert</p>
+      </div>
+      <div style="min-width:320px">
+        <label>API Base</label>
+        <input id="apiBase" value="http://127.0.0.1:8002" />
+        <div class="hint">Example: http://127.0.0.1:8002</div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <!-- Inputs -->
+      <div class="card">
+        <h2>Inputs</h2>
+
+        <div class="row">
+          <div>
+            <label>Bearer Token (JWT)</label>
+            <input id="token" placeholder="Paste access_token here" />
+            <div class="hint">If your endpoint is protected, token is required.</div>
+          </div>
+          <div>
+            <label>Plant ID</label>
+            <input id="plantId" value="P-001" placeholder="P-001" />
+            <div class="hint">Format: P-001, P-020, ...</div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Captured At (optional)</label>
+            <input id="capturedAt" placeholder="Leave empty to auto-generate" />
+            <div class="hint">ISO format. Leave empty to auto-set.</div>
+          </div>
+          <div>
+            <label>Image</label>
+            <input id="image" type="file" accept="image/*" />
+            <div class="hint">Upload a lettuce image from your dataset/demo set.</div>
+          </div>
+        </div>
+
+        <div class="row3" style="margin-top:12px">
+          <div>
+            <label>Temperature (°C)</label>
+            <input id="temp" type="number" step="0.1" value="5" />
+          </div>
+          <div>
+            <label>Humidity (%)</label>
+            <input id="hum" type="number" step="0.1" value="88" />
+          </div>
+          <div>
+            <label>Endpoint</label>
+            <select id="endpoint">
+              <option value="/spoilage/predict">/spoilage/predict</option>
+              <option value="/spoilage/stage-only">/spoilage/stage-only</option>
+            </select>
+            <div class="hint">Remaining-days-only is JSON based.</div>
+          </div>
+        </div>
+
+        <div class="btnline" style="margin-top:14px">
+          <button class="btn" id="runBtn">Run Inference</button>
+          <button class="btn secondary" id="toggleRawBtn" type="button">Show Raw JSON</button>
+        </div>
+
+        <div class="err" id="errBox"></div>
+        <div class="ok" id="okBox"></div>
+
+        <div class="preview">
+          <div class="small" style="margin-bottom:8px">Preview</div>
+          <img id="imgPreview" alt="preview" />
+        </div>
+      </div>
+
+      <!-- Results -->
+      <div class="card">
+        <h2>Results</h2>
+
+        <div class="results">
+          <div class="stat">
+            <div class="k">Stage</div>
+            <div class="v" id="stageVal">—</div>
+            <div class="badge" id="stageBadge" style="margin-top:8px;display:none">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">Remaining Days</div>
+            <div class="v" id="daysVal">—</div>
+            <div class="small" id="plantMeta">—</div>
+          </div>
+          <div class="stat">
+            <div class="k">Status</div>
+            <div class="v" style="font-size:14px;font-weight:800" id="statusVal">—</div>
+            <div class="small" id="capturedMeta">—</div>
+          </div>
+        </div>
+
+        <div class="prob">
+          <h3>Stage Probabilities</h3>
+          <div id="probWrap"></div>
+        </div>
+
+        <div class="mono" id="rawJson"></div>
+
+        <div class="small" style="margin-top:10px">
+          Tip: If you get <b>401</b>, paste a valid JWT token. If you get CORS issues, enable CORS in FastAPI (see note below).
+        </div>
+      </div>
+    </div>
+
+    <!-- Remaining Days Only -->
+    <div class="card" style="margin-top:16px">
+      <h2>Remaining Days Only (debug)</h2>
+      <div class="row">
+        <div>
+          <label>Stage Probs (JSON)</label>
+          <textarea id="probsJson" rows="6">{
+  "fresh": 0.0,
+  "slightly_aged": 0.0,
+  "near_spoilage": 1.0,
+  "spoiled": 0.0
+}</textarea>
+          <div class="hint">Use outputs from stage-only to test regressor.</div>
+        </div>
+        <div>
+          <label>Temperature (°C)</label>
+          <input id="temp2" type="number" step="0.1" value="5" />
+          <label style="margin-top:10px">Humidity (%)</label>
+          <input id="hum2" type="number" step="0.1" value="88" />
+          <div class="btnline" style="margin-top:14px">
+            <button class="btn" id="runRegBtn">POST /spoilage/remaining-days-only</button>
+          </div>
+          <div class="small" id="regOut" style="margin-top:10px">—</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function showErr(msg){
+      $("errBox").style.display="block";
+      $("errBox").textContent = msg;
+      $("okBox").style.display="none";
+    }
+    function showOk(msg){
+      $("okBox").style.display="block";
+      $("okBox").textContent = msg;
+      $("errBox").style.display="none";
+    }
+
+    function setBadge(stage){
+      const badge = $("stageBadge");
+      badge.style.display="inline-flex";
+      badge.className = "badge";
+      let cls="badge";
+      if(stage==="fresh") cls += " green";
+      else if(stage==="slightly_aged") cls += " amber";
+      else if(stage==="near_spoilage") cls += " amber";
+      else if(stage==="spoiled") cls += " red";
+      badge.className = cls;
+      badge.textContent = stage;
+    }
+
+    function renderProbs(stage_probs){
+      const wrap = $("probWrap");
+      wrap.innerHTML = "";
+      const keys = ["fresh","slightly_aged","near_spoilage","spoiled"];
+      keys.forEach(k=>{
+        const v = Number(stage_probs?.[k] ?? 0);
+        const pct = Math.max(0, Math.min(100, v*100));
+        const row = document.createElement("div");
+        row.className = "bar";
+        row.innerHTML = `
+          <div style="font-weight:700">${k}</div>
+          <div class="track"><div class="fill" style="width:${pct.toFixed(1)}%"></div></div>
+          <div style="text-align:right">${pct.toFixed(1)}%</div>
+        `;
+        wrap.appendChild(row);
+      });
+    }
+
+    function pretty(v){
+      if(v === null || v === undefined) return "—";
+      if(typeof v === "number") return (Math.round(v*1000)/1000).toString();
+      return String(v);
+    }
+
+    $("toggleRawBtn").addEventListener("click", ()=>{
+      const el = $("rawJson");
+      el.style.display = (el.style.display==="none" || !el.style.display) ? "block" : "none";
+    });
+
+    $("image").addEventListener("change", (e)=>{
+      const f = e.target.files?.[0];
+      if(!f) return;
+      const url = URL.createObjectURL(f);
+      $("imgPreview").src = url;
+    });
+
+    async function callPredict(){
+      const base = $("apiBase").value.trim().replace(/\/+$/,"");
+      const endpoint = $("endpoint").value;
+      const url = base + endpoint;
+
+      const token = $("token").value.trim();
+      const plantId = $("plantId").value.trim();
+      const capturedAt = $("capturedAt").value.trim();
+      const temp = $("temp").value;
+      const hum = $("hum").value;
+
+      const img = $("image").files?.[0];
+      if(!img) return showErr("Please choose an image file.");
+
+      const form = new FormData();
+      form.append("image", img);
+      form.append("temperature", temp);
+      form.append("humidity", hum);
+      form.append("plant_id", plantId);
+      if(capturedAt) form.append("captured_at", capturedAt);
+
+      const headers = {};
+      if(token) headers["Authorization"] = "Bearer " + token;
+
+      $("rawJson").textContent = "";
+      try{
+        const res = await fetch(url, { method:"POST", headers, body: form });
+        const text = await res.text();
+        let data;
+        try{ data = JSON.parse(text); } catch { data = { raw:text }; }
+
+        if(!res.ok){
+          return showErr(`HTTP ${res.status}: ${data?.detail ? JSON.stringify(data.detail) : text}`);
+        }
+
+        showOk("Request successful (200).");
+        $("rawJson").textContent = JSON.stringify(data, null, 2);
+
+        // stage-only endpoint returns: {plant_id,captured_at,stage,stage_probs,status}
+        // predict endpoint returns: {plant_id,captured_at,stage,stage_probs,remaining_days,status}
+        $("stageVal").textContent = data.stage ?? "—";
+        setBadge(data.stage ?? "—");
+
+        $("daysVal").textContent = (data.remaining_days !== undefined) ? pretty(data.remaining_days) : "—";
+        $("statusVal").textContent = data.status ?? "—";
+
+        $("plantMeta").textContent = data.plant_id ? `Plant: ${data.plant_id}` : "—";
+        $("capturedMeta").textContent = data.captured_at ? `Captured: ${data.captured_at}` : "—";
+
+        renderProbs(data.stage_probs || {});
+      }catch(err){
+        showErr(String(err));
+      }
+    }
+
+    async function callRemainingOnly(){
+      const base = $("apiBase").value.trim().replace(/\/+$/,"");
+      const url = base + "/spoilage/remaining-days-only";
+      const token = $("token").value.trim();
+
+      let probs;
+      try{ probs = JSON.parse($("probsJson").value); }
+      catch { return showErr("Stage probs JSON is invalid."); }
+
+      const payload = {
+        stage_probs: probs,
+        temperature: Number($("temp2").value),
+        humidity: Number($("hum2").value),
+      };
+
+      const headers = {"Content-Type":"application/json"};
+      if(token) headers["Authorization"] = "Bearer " + token;
+
+      try{
+        const res = await fetch(url, { method:"POST", headers, body: JSON.stringify(payload) });
+        const text = await res.text();
+        let data;
+        try{ data = JSON.parse(text); } catch { data = { raw:text }; }
+
+        if(!res.ok){
+          $("regOut").textContent = `HTTP ${res.status}: ${data?.detail ? JSON.stringify(data.detail) : text}`;
+          return;
+        }
+        $("regOut").textContent = `remaining_days = ${pretty(data.remaining_days)}`;
+      }catch(err){
+        $("regOut").textContent = String(err);
+      }
+    }
+
+    $("runBtn").addEventListener("click", callPredict);
+    $("runRegBtn").addEventListener("click", callRemainingOnly);
+
+    // default preview placeholder
+    $("imgPreview").src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" width="800" height="400">
+        <rect width="100%" height="100%" fill="#f1f5f9"/>
+        <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle"
+          fill="#64748b" font-size="18" font-family="Arial">
+          Upload an image to preview
+        </text>
+      </svg>
+    `);
+  </script>
+</body>
+</html>
