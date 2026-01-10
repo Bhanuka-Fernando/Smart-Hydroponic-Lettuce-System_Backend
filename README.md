@@ -69,7 +69,6 @@ Outputs include real-time alerts, scores, forecasts, and recommendations to redu
 
 ## Ports (Example)
 
-Update based on your actual setup:
 
 | Service                 | Default Port |
 | ----------------------- | ------------ |
