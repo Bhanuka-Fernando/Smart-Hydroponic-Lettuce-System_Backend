@@ -262,21 +262,6 @@ Expected response includes:
 
 `POST /spoilage/remaining-days-only` (application/json)
 
-Example request:
-
-```json
-{
-  "stage_probs": {
-    "fresh": 0.01,
-    "slightly_aged": 0.10,
-    "near_spoilage": 0.85,
-    "spoiled": 0.04
-  },
-  "temperature": 7,
-  "humidity": 93
-}
-```
-
 ---
 
 ### B) Leaf Health Detection Service (Typical)
@@ -303,45 +288,6 @@ Endpoints vary by implementation, but usually include:
 * `POST /weight/estimate`
   Input: vision measurements and/or sensors
   Output: growth indicators, estimated weight, readiness.
-
----
-
-## Demo UI (Optional)
-
-Some services include an HTML demo UI for quick panel demos (example: Spoilage).
-
-### Start the Demo UI
-
-```bash
-cd spoilage-ml-service/demo-ui
-python -m http.server 5173
-```
-
-Open:
-
-```txt
-http://127.0.0.1:5173/index.html
-```
-
-> If the demo UI is calling the backend from the browser, you may need CORS enabled.
-
----
-
-## CORS Setup (If Browser UI Calls Backend)
-
-Add this in your service `app/main.py`:
-
-```python
-from fastapi.middleware.cors import CORSMiddleware
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # or ["http://127.0.0.1:5173"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
 
 ---
 
@@ -382,20 +328,7 @@ Fix:
 * TensorFlow CPU optimization logs are normal.
 * If scikit-learn warns about version mismatch, install the same sklearn version used during training.
 
----
 
-## Contribution Notes
-
-* Each member maintains their service code and model artifacts.
-* Shared conventions:
-
-  * consistent request/response schemas (Pydantic)
-  * `/health` endpoints
-  * `/docs` for Swagger per service
-
----
-
-## License
 
 Academic / research use. Update as needed for your repo policy.
 
