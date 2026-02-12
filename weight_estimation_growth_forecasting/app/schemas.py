@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 
 class Sensors(BaseModel):
     airT_mean_3d_C: float
@@ -49,3 +50,38 @@ class PanelTodayResponse(BaseModel):
     Weight_tomorrow_g: float
 
 
+## IOT SIMULATION
+
+class SensorPacket(BaseModel):
+    device_id: str
+    zone_id: str
+    ts: datetime
+    airT: float
+    RH: float
+    EC: float
+    pH: float
+
+class LatestDashboardResponse(BaseModel):
+    zone_id: str
+    plant_id: str
+    ts: datetime | None = None
+
+    # latest sensors (raw)
+    airT: float | None = None
+    RH: float | None = None
+    EC: float | None = None
+    pH: float | None = None
+
+    # 3-day means
+    airT_mean_3d_C: float | None = None
+    RH_mean_3d_pct: float | None = None
+    EC_mean_3d_mScm: float | None = None
+    pH_mean_3d: float | None = None
+
+    # predictions
+    A_proj_cm2: float | None = None
+    D_proj_cm: float | None = None
+    A_leaf_est_cm2: float | None = None
+    weight_est_g: float | None = None
+    A_next_cm2: float | None = None
+    D_next_cm: float | None = None

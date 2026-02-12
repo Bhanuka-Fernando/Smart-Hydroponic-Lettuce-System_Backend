@@ -10,3 +10,6 @@ opencv-python
 scikit-learn 
 joblib
 pandas
+sqlalchemy
+python-multipart
+requests
