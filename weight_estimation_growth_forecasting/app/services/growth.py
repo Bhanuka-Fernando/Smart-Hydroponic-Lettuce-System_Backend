@@ -1,7 +1,8 @@
+# app/services/growth.py
 import math
 import pickle
 from functools import lru_cache
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Any
 
 import numpy as np
 
@@ -18,6 +19,19 @@ except Exception:
 from app.core.paths import GROWTH_BUNDLE
 
 EPS = 1e-6
+
+# Default column set (ONLY used if we cannot detect cols from bundle/model)
+DEFAULT_FEATURE_COLS = [
+    "DAP",
+    "A_t_cm2",
+    "D_t_cm",
+    "deltaA_cm2",
+    "RGR",
+    "airT_mean_3d_C",
+    "RH_mean_3d_pct",
+    "EC_mean_3d_mScm",
+    "pH_mean_3d",
+]
 
 
 def _load_bundle(path):
@@ -36,22 +50,12 @@ def _bundle():
 
 
 @lru_cache(maxsize=1)
-def _feature_cols() -> Optional[List[str]]:
-    b = _bundle()
-    if isinstance(b, dict) and "feature_cols" in b:
-        return list(b["feature_cols"])
-    return None
-
-
-@lru_cache(maxsize=1)
 def _model():
     b = _bundle()
 
     # your notebook saves it as "model2"
-    if isinstance(b, dict) and "model2" in b:
-        m = b["model2"]
-        if hasattr(m, "predict"):
-            return m
+    if isinstance(b, dict) and "model2" in b and hasattr(b["model2"], "predict"):
+        return b["model2"]
 
     # fallback: scan dict values
     if isinstance(b, dict):
@@ -59,11 +63,35 @@ def _model():
             if hasattr(v, "predict"):
                 return v
 
-    # bundle itself might be a model
     if hasattr(b, "predict"):
         return b
 
     raise RuntimeError("Growth bundle loaded but no predictor with .predict() found.")
+
+
+@lru_cache(maxsize=1)
+def _feature_cols() -> List[str]:
+    """
+    Priority:
+      1) bundle['feature_cols']
+      2) sklearn model.feature_names_in_
+      3) DEFAULT_FEATURE_COLS
+    """
+    b = _bundle()
+    if isinstance(b, dict):
+        cols = b.get("feature_cols") or b.get("features") or b.get("columns")
+        if cols and isinstance(cols, (list, tuple)):
+            return list(cols)
+
+    m = _model()
+    if hasattr(m, "feature_names_in_"):
+        try:
+            return list(getattr(m, "feature_names_in_"))
+        except Exception:
+            pass
+
+    # last resort
+    return list(DEFAULT_FEATURE_COLS)
 
 
 def compute_deltaA_RGR(A_t_cm2: float, A_prev_cm2: float) -> Tuple[float, float]:
@@ -73,13 +101,47 @@ def compute_deltaA_RGR(A_t_cm2: float, A_prev_cm2: float) -> Tuple[float, float]
 
 
 def _make_X(row: dict, feat_cols: List[str]):
-    """
-    Build model input with correct feature names.
-    Uses DataFrame if pandas exists; otherwise uses ordered NumPy array.
-    """
     if pd is not None:
         return pd.DataFrame([row], columns=feat_cols)
     return np.array([[row[c] for c in feat_cols]], dtype=float)
+
+
+def _get_sensor(sensors: Any, name: str, fallback: float = 0.0) -> float:
+    """
+    Works with:
+      - sensors.airT_mean_3d_C (your DB means object)
+      - sensors.airT / RH / EC / pH (raw)
+      - dict style
+    """
+    if sensors is None:
+        return float(fallback)
+
+    # dict
+    if isinstance(sensors, dict):
+        v = sensors.get(name)
+        if v is None:
+            # try raw names mapping
+            raw_map = {
+                "airT_mean_3d_C": "airT",
+                "RH_mean_3d_pct": "RH",
+                "EC_mean_3d_mScm": "EC",
+                "pH_mean_3d": "pH",
+            }
+            v = sensors.get(raw_map.get(name, ""))
+        return float(v) if v is not None else float(fallback)
+
+    # object attrs
+    v = getattr(sensors, name, None)
+    if v is None:
+        raw_map = {
+            "airT_mean_3d_C": "airT",
+            "RH_mean_3d_pct": "RH",
+            "EC_mean_3d_mScm": "EC",
+            "pH_mean_3d": "pH",
+        }
+        v = getattr(sensors, raw_map.get(name, ""), None)
+
+    return float(v) if v is not None else float(fallback)
 
 
 def predict_tomorrow(
@@ -90,8 +152,6 @@ def predict_tomorrow(
     sensors,
 ) -> Tuple[float, float]:
     feat_cols = _feature_cols()
-    if not feat_cols:
-        raise RuntimeError("Growth bundle missing feature_cols. Re-save bundle with feature_cols.")
 
     deltaA_cm2, RGR = compute_deltaA_RGR(A_t_cm2, A_prev_cm2)
 
@@ -101,10 +161,10 @@ def predict_tomorrow(
         "D_t_cm": float(D_t_cm),
         "deltaA_cm2": float(deltaA_cm2),
         "RGR": float(RGR),
-        "airT_mean_3d_C": float(sensors.airT_mean_3d_C),
-        "RH_mean_3d_pct": float(sensors.RH_mean_3d_pct),
-        "EC_mean_3d_mScm": float(sensors.EC_mean_3d_mScm),
-        "pH_mean_3d": float(sensors.pH_mean_3d),
+        "airT_mean_3d_C": _get_sensor(sensors, "airT_mean_3d_C", 0.0),
+        "RH_mean_3d_pct": _get_sensor(sensors, "RH_mean_3d_pct", 0.0),
+        "EC_mean_3d_mScm": _get_sensor(sensors, "EC_mean_3d_mScm", 0.0),
+        "pH_mean_3d": _get_sensor(sensors, "pH_mean_3d", 0.0),
     }
 
     X = _make_X(row, feat_cols)
@@ -121,10 +181,7 @@ def forecast_n_days(
     n_days: int,
 ):
     feat_cols = _feature_cols()
-    if not feat_cols:
-        raise RuntimeError("Growth bundle missing feature_cols. Re-save bundle with feature_cols.")
-
-    model = _model()  # cache once
+    model = _model()
 
     out = []
     A_prev = float(A_prev_cm2)
@@ -141,10 +198,10 @@ def forecast_n_days(
             "D_t_cm": float(D_curr),
             "deltaA_cm2": float(deltaA),
             "RGR": float(RGR),
-            "airT_mean_3d_C": float(sensors.airT_mean_3d_C),
-            "RH_mean_3d_pct": float(sensors.RH_mean_3d_pct),
-            "EC_mean_3d_mScm": float(sensors.EC_mean_3d_mScm),
-            "pH_mean_3d": float(sensors.pH_mean_3d),
+            "airT_mean_3d_C": _get_sensor(sensors, "airT_mean_3d_C", 0.0),
+            "RH_mean_3d_pct": _get_sensor(sensors, "RH_mean_3d_pct", 0.0),
+            "EC_mean_3d_mScm": _get_sensor(sensors, "EC_mean_3d_mScm", 0.0),
+            "pH_mean_3d": _get_sensor(sensors, "pH_mean_3d", 0.0),
         }
 
         X = _make_X(row, feat_cols)
@@ -152,15 +209,9 @@ def forecast_n_days(
         A_next, D_next = float(A_next), float(D_next)
 
         out.append(
-            {
-                "step": step,
-                "DAP_pred": dap + 1,
-                "A_pred_cm2": A_next,
-                "D_pred_cm": D_next,
-            }
+            {"step": step, "DAP_pred": dap + 1, "A_pred_cm2": A_next, "D_pred_cm": D_next}
         )
 
-        # shift for next iteration
         A_prev = A_curr
         A_curr = A_next
         D_curr = D_next

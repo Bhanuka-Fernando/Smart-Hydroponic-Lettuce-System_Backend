@@ -3,14 +3,14 @@ from typing import Optional
 from datetime import datetime
 
 class Sensors(BaseModel):
-    airT_mean_3d_C: float
-    RH_mean_3d_pct: float
-    EC_mean_3d_mScm: float
-    pH_mean_3d: float
+    airT: Optional[float] = None
+    RH: Optional[float] = None
+    EC: Optional[float] = None
+    pH: Optional[float] = None
 
 class InferRequest(BaseModel):
     dap: int
-    sensors: Sensors
+    sensors: Optional[Sensors] = None
     A_prev_cm2: Optional[float] = None  # yesterday projected area (from DB)
 
 class InferResponse(BaseModel):
@@ -21,6 +21,7 @@ class InferResponse(BaseModel):
     A_proj_tmr_cm2: float
     D_proj_tmr_cm: float
     W_tmr_g: float
+    mask_overlay_b64: Optional[str] = None
 
 class ForecastRequest(BaseModel):
     dap: int

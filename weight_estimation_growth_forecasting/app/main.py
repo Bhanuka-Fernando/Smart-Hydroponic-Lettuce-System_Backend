@@ -10,7 +10,6 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="ML Inference Service", version="0.1.0")
 
-# ✅ allow demo UI to call API from browser
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],     # for demo only (tighten later)

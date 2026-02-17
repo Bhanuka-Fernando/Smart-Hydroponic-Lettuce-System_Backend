@@ -2,6 +2,7 @@ from fastapi import APIRouter, UploadFile, File, Form, Depends
 from sqlalchemy.orm import Session
 from datetime import datetime
 import os
+import base64
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -49,6 +50,10 @@ async def infer_today(
     A_des_cm2 = leaf_area_from_proj(A_proj_cm2, D_proj_cm)
     W_today_g = predict_weight_g(A_des_cm2, D_proj_cm)
 
+    # ✅ create overlay mask png (bytes) and encode
+    mask_png = make_mask_overlay_png(rgb_bytes, alpha=0.45)
+    mask_b64 = base64.b64encode(mask_png).decode("utf-8")
+
     # must come from DB for good forecasts; fallback = no growth info
     A_prev = payload.A_prev_cm2 if payload.A_prev_cm2 is not None else A_proj_cm2
 
@@ -72,6 +77,7 @@ async def infer_today(
         A_proj_tmr_cm2=A_tmr,
         D_proj_tmr_cm=D_tmr,
         W_tmr_g=W_tmr_g,
+        mask_overlay_b64=mask_b64,
     )
 
 
@@ -300,3 +306,30 @@ def dashboard_latest(zone_id: str, plant_id: str, db: Session = Depends(get_db))
         D_next_cm=getattr(latest_pred, "D_next_cm", None) if latest_pred else None,
     )
 
+from fastapi import HTTPException
+
+@router.post("/weight/estimate")
+async def weight_estimate_mobile(
+    image: UploadFile = File(...),
+    depth: UploadFile = File(...),
+    plant_id: str = Form(None),
+    captured_at: str = Form(None),
+):
+    rgb_bytes = await image.read()
+    depth_bytes = await depth.read()
+
+    try:
+        A_proj_cm2, D_proj_cm, Z_m = get_proj_area_and_diam(rgb_bytes, depth_bytes)
+        A_leaf_cm2 = leaf_area_from_proj(A_proj_cm2, D_proj_cm)
+        W_today_g = predict_weight_g(A_leaf_cm2, D_proj_cm)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "plant_id": plant_id,
+        "captured_at": captured_at,
+        "biomass_g": float(W_today_g),
+        "leaf_area_cm2": float(A_leaf_cm2),
+        "leaf_diameter_cm": float(D_proj_cm),
+        "z_m": float(Z_m),
+    }
