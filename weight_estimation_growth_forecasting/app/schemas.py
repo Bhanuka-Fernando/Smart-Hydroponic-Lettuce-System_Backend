@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Any
 from datetime import datetime
 
 class Sensors(BaseModel):
@@ -9,9 +9,11 @@ class Sensors(BaseModel):
     pH: Optional[float] = None
 
 class InferRequest(BaseModel):
+    plant_id: str
+    zone_id: str
     dap: int
     sensors: Optional[Sensors] = None
-    A_prev_cm2: Optional[float] = None  # yesterday projected area (from DB)
+    A_prev_cm2: Optional[float] = None
 
 class InferResponse(BaseModel):
     A_proj_cm2: float
@@ -24,21 +26,25 @@ class InferResponse(BaseModel):
     mask_overlay_b64: Optional[str] = None
 
 class ForecastRequest(BaseModel):
+    plant_id: str
+    zone_id: str
     dap: int
     n_days: int
-    A_prev_cm2: float
+    A_prev_cm2: Optional[float] = None 
     A_t_cm2: float
     D_t_cm: float
-    sensors: Sensors
+    sensors: Optional[Any] = None
 
 class ForecastPoint(BaseModel):
     step: int
     DAP_pred: int
     A_pred_cm2: float
     D_pred_cm: float
+    A_leaf_pred_cm2: float
+    W_pred_g: float
 
 class ForecastResponse(BaseModel):
-    points: list[ForecastPoint]
+    points: List[ForecastPoint]
 
 
 class PanelTodayResponse(BaseModel):
