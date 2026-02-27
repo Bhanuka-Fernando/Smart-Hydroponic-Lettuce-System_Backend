@@ -92,3 +92,57 @@ class LatestDashboardResponse(BaseModel):
     weight_est_g: float | None = None
     A_next_cm2: float | None = None
     D_next_cm: float | None = None
+
+
+
+class PlantListItem(BaseModel):
+    plant_id: str
+    name: str
+    age_days: int
+    area_cm2: Optional[float] = None
+    diameter_cm: Optional[float] = None
+    estimated_weight_g: Optional[float] = None
+    status: str  # "NOT_READY" | "HARVEST_READY"
+    image_url: Optional[str] = None
+
+
+class PlantHistoryItem(BaseModel):
+    date: str
+    date_label: str
+    actual_weight_g: Optional[float] = None
+    predicted_weight_g: Optional[float] = None
+    delta_g: Optional[float] = None
+    status: str  # "On Track" etc.
+
+
+class PlantDetailsResponse(BaseModel):
+    plant_id: str
+    display_name: str
+    planted_on: str
+    age_days: int
+    start_weight_g: float
+    current_weight_g: float
+    growth_pct: float
+    predicted_today_g: Optional[float] = None
+    trajectory: Optional[dict] = None  # {labels:[], values:[]}
+    history: Optional[List[PlantHistoryItem]] = None
+
+class WeightSaveRequest(BaseModel):
+    plant_id: str
+    zone_id: str
+    captured_at: datetime
+
+    A_proj_cm2: float
+    D_proj_cm: float
+    A_des_cm2: float
+    W_today_g: float
+
+    image_url: Optional[str] = None
+
+class HistoryItem(BaseModel):
+    ts: datetime
+    A_proj_cm2: float
+    D_proj_cm: float
+    A_leaf_est_cm2: float
+    weight_est_g: float
+

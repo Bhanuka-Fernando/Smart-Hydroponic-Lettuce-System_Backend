@@ -11,5 +11,6 @@ scikit-learn
 joblib
 pandas
 sqlalchemy
+psycopg2-binary
 python-multipart
 requests

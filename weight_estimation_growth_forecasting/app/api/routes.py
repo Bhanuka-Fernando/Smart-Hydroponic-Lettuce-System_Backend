@@ -5,6 +5,7 @@ from sqlalchemy import desc
 from datetime import datetime
 import os
 import base64
+from typing import Optional, List
 from pydantic import ValidationError
 
 from app.core.db_deps import get_db
@@ -18,6 +19,9 @@ from app.schemas import (
     PanelTodayResponse,
     SensorPacket,
     LatestDashboardResponse,
+    WeightSaveRequest,
+    PlantDetailsResponse,
+    PlantHistoryItem,
 )
 
 from app.services.vision import (
@@ -34,6 +38,14 @@ UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 router = APIRouter(prefix="/infer", tags=["inference"])
+
+
+def _date_label(ts: datetime) -> str:
+    today = datetime.utcnow().date()
+    d = ts.date()
+    if d == today:
+        return f"Today, {ts.strftime('%b %d')}"
+    return ts.strftime("%b %d")
 
 
 @router.post("/today", response_model=InferResponse)
@@ -54,7 +66,7 @@ async def infer_today(
     depth_bytes = await depth.read()
 
     # 2) vision extractor
-    A_proj_cm2, D_proj_cm, Z_m = get_proj_area_and_diam(rgb_bytes, depth_bytes)
+    A_proj_cm2, D_proj_cm, _ = get_proj_area_and_diam(rgb_bytes, depth_bytes)
 
     # 3) projected -> leaf area -> weight
     A_des_cm2 = leaf_area_from_proj(A_proj_cm2, D_proj_cm)
@@ -86,7 +98,10 @@ async def infer_today(
     if A_prev is None:
         prev = (
             db.query(PredictionLog)
-            .filter(PredictionLog.plant_id == payload.plant_id)
+            .filter(
+                PredictionLog.plant_id == payload.plant_id,
+                PredictionLog.zone_id == payload.zone_id,
+            )
             .order_by(PredictionLog.ts.desc())
             .first()
         )
@@ -98,10 +113,10 @@ async def infer_today(
         A_t_cm2=A_proj_cm2,
         D_t_cm=D_proj_cm,
         A_prev_cm2=A_prev,
-        sensors=means,  # dict with mean keys
+        sensors=means,
     )
 
-    # 9) store prediction log (for future history)
+    # 9) store prediction log
     db.add(
         PredictionLog(
             plant_id=payload.plant_id,
@@ -117,7 +132,7 @@ async def infer_today(
     )
     db.commit()
 
-    # 10) compute tomorrow weight via leaf-area
+    # 10) compute tomorrow weight
     A_leaf_tmr = leaf_area_from_proj(A_tmr, D_tmr)
     W_tmr_g = predict_weight_g(A_leaf_tmr, D_tmr)
 
@@ -140,7 +155,10 @@ async def infer_forecast(payload: ForecastRequest, db: Session = Depends(get_db)
     if A_prev is None:
         prev = (
             db.query(PredictionLog)
-            .filter(PredictionLog.plant_id == payload.plant_id)
+            .filter(
+                PredictionLog.plant_id == payload.plant_id,
+                PredictionLog.zone_id == payload.zone_id,
+            )
             .order_by(PredictionLog.ts.desc())
             .first()
         )
@@ -156,7 +174,7 @@ async def infer_forecast(payload: ForecastRequest, db: Session = Depends(get_db)
         n_days=payload.n_days,
     )
 
-    # 3) enrich each point with leaf area + weight
+    # 3) enrich
     points_out = []
     for p in points_raw:
         A_proj = float(p["A_pred_cm2"])
@@ -191,7 +209,6 @@ async def panel_today(
     depth_bytes = await depth.read()
 
     A_proj_cm2, D_cm, _ = get_proj_area_and_diam(rgb_bytes, depth_bytes)
-
     A_leaf_cm2 = leaf_area_from_proj(A_proj_cm2, D_cm)
     W_today_g = predict_weight_g(A_leaf_cm2, D_cm)
 
@@ -245,105 +262,6 @@ def iot_ingest(packet: SensorPacket, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-@router.post("/scans/ingest")
-async def scans_ingest(
-    device_id: str = Form(...),
-    plant_id: str = Form(...),
-    zone_id: str = Form(...),
-    ts: str = Form(...),
-    rgb_image: UploadFile = File(...),
-    depth_image: UploadFile | None = File(None),
-    db: Session = Depends(get_db),
-):
-    ts_dt = datetime.fromisoformat(ts)
-
-    rgb_bytes = await rgb_image.read()
-    depth_bytes = await depth_image.read() if depth_image else None
-
-    if depth_bytes is None:
-        return {"ok": False, "error": "depth_image is required for this vision pipeline"}
-
-    rgb_path = os.path.join(UPLOAD_DIR, f"{plant_id}_{int(ts_dt.timestamp())}_{rgb_image.filename}")
-    with open(rgb_path, "wb") as f:
-        f.write(rgb_bytes)
-
-    depth_path = os.path.join(UPLOAD_DIR, f"{plant_id}_{int(ts_dt.timestamp())}_{depth_image.filename}")
-    with open(depth_path, "wb") as f:
-        f.write(depth_bytes)
-
-    db.add(
-        PlantScan(
-            device_id=device_id,
-            plant_id=plant_id,
-            zone_id=zone_id,
-            ts=ts_dt,
-            rgb_path=rgb_path,
-            depth_path=depth_path,
-        )
-    )
-    db.commit()
-
-    A_proj_cm2, D_proj_cm, Z_m = get_proj_area_and_diam(rgb_bytes, depth_bytes)
-
-    if A_proj_cm2 <= 0 or D_proj_cm <= 0:
-        return {
-            "ok": False,
-            "error": "vision returned zero area/diameter (bad mask or invalid depth)",
-            "A_proj_cm2": float(A_proj_cm2),
-            "D_proj_cm": float(D_proj_cm),
-            "Z_m": float(Z_m),
-        }
-
-    A_leaf_est_cm2 = float(leaf_area_from_proj(A_proj_cm2, D_proj_cm))
-    W_g = float(predict_weight_g(A_leaf_est_cm2, D_proj_cm))
-
-    means = get_3day_means(db, zone_id, ts_dt)
-
-    A_next = None
-    D_next = None
-    if means:
-        A_next, D_next = predict_tomorrow(
-            dap=25,
-            A_t_cm2=A_proj_cm2,
-            D_t_cm=D_proj_cm,
-            A_prev_cm2=A_proj_cm2,
-            sensors=means,
-        )
-        A_next = float(A_next)
-        D_next = float(D_next)
-
-    db.add(
-        PredictionLog(
-            plant_id=plant_id,
-            zone_id=zone_id,
-            ts=ts_dt,
-            A_proj_cm2=float(A_proj_cm2),
-            D_proj_cm=float(D_proj_cm),
-            A_leaf_est_cm2=float(A_leaf_est_cm2),
-            weight_est_g=float(W_g),
-            A_next_cm2=A_next,
-            D_next_cm=D_next,
-        )
-    )
-    db.commit()
-
-    return {
-        "ok": True,
-        "plant_id": plant_id,
-        "zone_id": zone_id,
-        "ts": ts_dt.isoformat(),
-        "A_proj_cm2": float(A_proj_cm2),
-        "D_proj_cm": float(D_proj_cm),
-        "Z_m": float(Z_m),
-        "A_leaf_est_cm2": float(A_leaf_est_cm2),
-        "weight_est_g": float(W_g),
-        "A_next_cm2": A_next,
-        "D_next_cm": D_next,
-        "sensor_means_3d": means,
-        "saved": {"rgb_path": rgb_path, "depth_path": depth_path},
-    }
-
-
 @router.get("/dashboard/latest", response_model=LatestDashboardResponse)
 def dashboard_latest(zone_id: str, plant_id: str, db: Session = Depends(get_db)):
     latest_sensor = (
@@ -370,7 +288,7 @@ def dashboard_latest(zone_id: str, plant_id: str, db: Session = Depends(get_db))
         airT=getattr(latest_sensor, "airT", None) if latest_sensor else None,
         RH=getattr(latest_sensor, "RH", None) if latest_sensor else None,
         EC=getattr(latest_sensor, "EC", None) if latest_sensor else None,
-        pH=getattr(latest_sensor, "pH", None) if latest_sensor else None,
+        pH=getattr(latatest_sensor, "pH", None) if latest_sensor else None,
         **means,
         A_proj_cm2=getattr(latest_pred, "A_proj_cm2", None) if latest_pred else None,
         D_proj_cm=getattr(latest_pred, "D_proj_cm", None) if latest_pred else None,
@@ -378,4 +296,86 @@ def dashboard_latest(zone_id: str, plant_id: str, db: Session = Depends(get_db))
         weight_est_g=getattr(latest_pred, "weight_est_g", None) if latest_pred else None,
         A_next_cm2=getattr(latest_pred, "A_next_cm2", None) if latest_pred else None,
         D_next_cm=getattr(latest_pred, "D_next_cm", None) if latest_pred else None,
+    )
+
+
+@router.post("/weights/save")
+def save_weight_result(payload: WeightSaveRequest, db: Session = Depends(get_db)):
+    row = PredictionLog(
+        plant_id=payload.plant_id,
+        zone_id=payload.zone_id,
+        ts=payload.captured_at,
+        A_proj_cm2=float(payload.A_proj_cm2),
+        D_proj_cm=float(payload.D_proj_cm),
+        A_leaf_est_cm2=float(payload.A_des_cm2),
+        weight_est_g=float(payload.W_today_g),
+        A_next_cm2=None,
+        D_next_cm=None,
+    )
+    db.add(row)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/plants/{plant_id}", response_model=PlantDetailsResponse)
+def get_plant_details(
+    plant_id: str,
+    zone_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    q = db.query(PredictionLog).filter(PredictionLog.plant_id == plant_id)
+    if zone_id:
+        q = q.filter(PredictionLog.zone_id == zone_id)
+
+    logs = q.order_by(PredictionLog.ts.asc()).limit(200).all()
+    if not logs:
+        raise HTTPException(status_code=404, detail="No records for this plant_id")
+
+    oldest = logs[0]
+    latest = logs[-1]
+
+    start_w = float(oldest.weight_est_g or 0.0)
+    current_w = float(latest.weight_est_g or 0.0)
+
+    growth_pct = ((current_w - start_w) / start_w * 100.0) if start_w > 0 else 0.0
+    age_days = max(0, (datetime.utcnow().date() - oldest.ts.date()).days)
+    planted_on = f"Planted {oldest.ts.strftime('%b %d')}"
+
+    labels = [l.ts.strftime("%b %d") for l in logs]
+    values = [float(l.weight_est_g or 0.0) for l in logs]
+
+    history_forward: list[PlantHistoryItem] = []
+    prev_actual: Optional[float] = None
+
+    for l in logs:
+        actual = float(l.weight_est_g) if l.weight_est_g is not None else None
+        delta = None
+        if actual is not None and prev_actual is not None:
+            delta = actual - prev_actual
+
+        history_forward.append(
+            PlantHistoryItem(
+                date=l.ts.date().isoformat(),
+                date_label=_date_label(l.ts),
+                actual_weight_g=actual,
+                predicted_weight_g=None,
+                delta_g=delta,
+                status="On Track",
+            )
+        )
+
+        if actual is not None:
+            prev_actual = actual
+
+    return PlantDetailsResponse(
+        plant_id=plant_id,
+        display_name=f"Plant {plant_id}",
+        planted_on=planted_on,
+        age_days=age_days,
+        start_weight_g=start_w,
+        current_weight_g=current_w,
+        growth_pct=growth_pct,
+        predicted_today_g=None,
+        trajectory={"labels": labels, "values": values},
+        history=list(reversed(history_forward)),  # latest first for UI
     )
