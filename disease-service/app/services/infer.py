@@ -2,8 +2,6 @@ import os
 import io
 import numpy as np
 from dotenv import load_dotenv
-
-# ✅ HEIC support (requires: brew install libheif + pip install pillow-heif)
 from pillow_heif import register_heif_opener
 register_heif_opener()
 
@@ -19,7 +17,6 @@ from app.services.annotate import draw_tipburn_boxes, pil_to_png_bytes
 
 load_dotenv()
 
-# ✅ MUST match your training label order
 CLASSES = ["Bacterial", "Fungal", "Healthy", "K_Def", "N_Def", "P_Def"]
 
 TIPBURN_PATH = os.getenv("TIPBURN_PATH", "artifacts/tipburn_best.pt")
@@ -32,7 +29,7 @@ tipburn_model = YOLO(TIPBURN_PATH)
 
 # --- Classifier ---
 def load_classifier(pt_path: str):
-    # 1) TorchScript
+
     try:
         m = torch.jit.load(pt_path, map_location=device)
         m.eval()
@@ -40,7 +37,6 @@ def load_classifier(pt_path: str):
     except Exception:
         pass
 
-    # 2) state_dict / checkpoint
     model = timm.create_model("tf_efficientnetv2_b1", pretrained=False, num_classes=len(CLASSES))
     ckpt = torch.load(pt_path, map_location=device)
 
@@ -57,12 +53,10 @@ def load_classifier(pt_path: str):
         except Exception:
             raise RuntimeError("Classifier .pt format not recognized. Re-save as state_dict or TorchScript.")
 
-    # remove DataParallel prefix if exists
     fixed = {k.replace("module.", ""): v for k, v in state.items()}
 
     missing, unexpected = model.load_state_dict(fixed, strict=False)
 
-    # fail fast if model/weights mismatch badly
     if len(missing) > 50 or len(unexpected) > 50:
         raise RuntimeError(
             f"Bad weight load (likely wrong timm model name). missing={len(missing)} unexpected={len(unexpected)}"
@@ -74,7 +68,6 @@ def load_classifier(pt_path: str):
 
 classifier, classifier_mode = load_classifier(CLASSIFIER_PATH)
 
-# ✅ Use timm transforms to match training config
 cfg = resolve_model_data_config(classifier)
 preprocess = create_transform(**cfg, is_training=False)
 
@@ -106,7 +99,6 @@ def predict_from_image_bytes(img_bytes: bytes):
             out = out[0]
         out = out.squeeze(0).detach().cpu().numpy().astype(float)
 
-    # if already probabilities, don't softmax again
     if (out.min() >= 0.0) and (out.max() <= 1.0) and (abs(out.sum() - 1.0) < 0.05):
         probs_arr = out
     else:
@@ -141,7 +133,6 @@ def predict_from_image_bytes(img_bytes: bytes):
         "classifier_mode": classifier_mode,
         "probs": probs,
         "tipburn": tip,
-        # keep old UI keys if you want:
         "main_issue": hs["primary_issue"],
         **hs,
     }
