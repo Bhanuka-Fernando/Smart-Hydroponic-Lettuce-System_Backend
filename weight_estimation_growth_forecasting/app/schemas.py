@@ -146,3 +146,83 @@ class HistoryItem(BaseModel):
     A_leaf_est_cm2: float
     weight_est_g: float
 
+
+# -------------------------
+# NEW: Frontend-Compatible Schemas
+# -------------------------
+
+class DashboardMetricsResponse(BaseModel):
+    zone_id: str
+    zone_name: str
+    plant_count: int
+    harvest_ready_count: int
+    avg_growth_pct: float
+    temperature_c: float
+    humidity_pct: float
+    ec_ms_cm: float
+    ph: float
+    last_updated: str
+
+
+class IoTSensorPayload(BaseModel):
+    zone_id: str
+    temperature_c: float
+    humidity_pct: float
+    ec_ms_cm: float
+    ph: float
+    timestamp: Optional[str] = None
+
+
+class IoTIngestResponse(BaseModel):
+    ok: bool
+    sensor_id: str
+    recorded_at: str
+
+
+class ActivityItem(BaseModel):
+    id: str
+    type: str
+    title: str
+    description: str
+    timestamp: str
+    zone: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ActivityHistoryResponse(BaseModel):
+    activities: List[ActivityItem]
+    total_count: int
+    has_more: bool
+
+
+# -------------------------
+# Growth Prediction Schemas
+# -------------------------
+
+class GrowthPredictionSeries(BaseModel):
+    labels: List[str]
+    actual: List[float]
+    predicted: List[float]
+
+
+class GrowthPredictionSaveRequest(BaseModel):
+    plant_id: str
+    date_label: str
+    predicted_weight_g: float
+    predicted_area_cm2: float
+    predicted_diameter_cm: float
+    change_pct: float
+    series: GrowthPredictionSeries
+
+
+class GrowthPredictionSaveResponse(BaseModel):
+    ok: bool
+    prediction_id: str
+    saved_at: str
+
+
+class PlantDeleteResponse(BaseModel):
+    ok: bool
+    plant_id: str
+    deleted_at: str
+

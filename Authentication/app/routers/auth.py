@@ -1,6 +1,9 @@
 from datetime import datetime, timedelta, timezone
+import os
+import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError
 from sqlmodel import Session, select
@@ -17,8 +20,12 @@ from app.core.security import (
     verify_password
 )
 from app.core.config import settings
-from app.models.user import User
-from app.schemas.user_schema import UserCreate, UserRead, LoginRequest, Token, RefreshRequest, GoogleAuthRequest
+from app.models.user import User, Preference
+from app.schemas.user_schema import (
+    UserCreate, UserRead, LoginRequest, Token, RefreshRequest, GoogleAuthRequest, 
+    UserProfile, ProfileUpdate, UserStats, PreferencesResponse, PreferencesUpdate,
+    ChangePasswordRequest, DeleteAccountRequest
+)
 
 from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
@@ -236,3 +243,59 @@ def google_login(
         access_token=access_token,
         refresh_token=refresh_value,
     )
+
+
+# -------------------------
+# USER PROFILE MANAGEMENT
+# -------------------------
+
+@router.get("/profile", response_model=UserProfile)
+def get_user_profile(current_user: User = Depends(get_current_user)):
+    """Get current user's profile with stats"""
+    # For now, return mock stats since the ML service is separate
+    # In production, you might want to make an internal API call to the ML service
+    stats = UserStats(
+        plants_monitored=0,
+        forecasts_made=0,
+        weight_scans=0,
+    )
+    
+    return UserProfile(
+        user_id=str(current_user.id),
+        name=current_user.full_name,
+        email=current_user.email,
+        phone=current_user.phone,
+        location=current_user.location,
+        bio=current_user.bio,
+        avatar_url=current_user.avatar_url,
+        stats=stats,
+    )
+
+
+@router.put("/profile", response_model=UserRead)
+def update_user_profile(
+    profile_update: ProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Update current user's profile"""
+    if profile_update.full_name is not None:
+        current_user.full_name = profile_update.full_name
+    
+    if profile_update.phone is not None:
+        current_user.phone = profile_update.phone
+    
+    if profile_update.location is not None:
+        current_user.location = profile_update.location
+    
+    if profile_update.bio is not None:
+        current_user.bio = profile_update.bio
+    
+    if profile_update.avatar_url is not None:
+        current_user.avatar_url = profile_update.avatar_url
+    
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    
+    return current_user

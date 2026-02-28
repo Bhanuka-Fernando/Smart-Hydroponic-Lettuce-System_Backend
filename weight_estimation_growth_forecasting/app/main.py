@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as infer_router
 from app.api.plants import router as plants_router
+from app.api.dashboard import router as dashboard_router
+from app.api.growth import router as growth_router
 
 from app.core.db import engine
 from app.core.db_models import Base
@@ -19,9 +21,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ include ONCE only
+# Include all routers
 app.include_router(infer_router)
 app.include_router(plants_router)
+app.include_router(dashboard_router)
+app.include_router(growth_router)
 
 @app.get("/health")
 def health():

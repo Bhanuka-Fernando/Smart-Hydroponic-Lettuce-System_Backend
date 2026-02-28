@@ -1,12 +1,12 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 
 from app.core.db_deps import get_db
 from app.core.db_models import PredictionLog, PlantScan
-from app.schemas import PlantListItem
+from app.schemas import PlantListItem, PlantDeleteResponse
 
 router = APIRouter(prefix="/plants", tags=["plants"])
 
@@ -19,7 +19,7 @@ def list_plants(
     zone_id: str | None = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(PredictionLog)
+    q = db.query(PredictionLog).filter(PredictionLog.deleted_at.is_(None))
     if zone_id:
         q = q.filter(PredictionLog.zone_id == zone_id)
 
@@ -71,3 +71,46 @@ def list_plants(
 
     out.sort(key=lambda x: x.plant_id)
     return out
+
+
+@router.delete("/{plant_id}", response_model=PlantDeleteResponse)
+def delete_plant(
+    plant_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Soft delete a plant by marking all its prediction logs and scans as deleted.
+    User authorization should be handled by middleware/dependency in production.
+    """
+    # Check if plant exists
+    existing_logs = db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id,
+        PredictionLog.deleted_at.is_(None)
+    ).first()
+    
+    if not existing_logs:
+        raise HTTPException(status_code=404, detail=f"Plant {plant_id} not found or already deleted")
+    
+    # Soft delete all prediction logs for this plant
+    now = datetime.now(timezone.utc)
+    db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id
+    ).update({
+        "deleted_at": now,
+        "updated_at": now
+    })
+    
+    # Soft delete all scans for this plant
+    db.query(PlantScan).filter(
+        PlantScan.plant_id == plant_id
+    ).update({
+        "deleted_at": now
+    })
+    
+    db.commit()
+    
+    return PlantDeleteResponse(
+        ok=True,
+        plant_id=plant_id,
+        deleted_at=now.isoformat()
+    )
