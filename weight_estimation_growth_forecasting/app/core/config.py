@@ -2,6 +2,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.core.paths import SERVICE_DIR
 
 class Settings(BaseSettings):
+    # PostgreSQL connection string - override via .env
+    DATABASE_URL: str = "postgresql://hydroponic_user:password@localhost:5432/hydroponic_iot"
+    
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
 

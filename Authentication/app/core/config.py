@@ -1,8 +1,8 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
-    # start with SQLite; later we can override via .env
-    DATABASE_URL: str = "sqlite:///./app.db"
+    # PostgreSQL connection string - override via .env
+    DATABASE_URL: str = "postgresql://hydroponic_user:password@localhost:5432/hydroponic_auth"
     SECRET_KEY: str = "key"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15

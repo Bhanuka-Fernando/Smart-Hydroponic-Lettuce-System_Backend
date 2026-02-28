@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, JSON
 from datetime import datetime, timezone
 from app.core.db import Base
 
@@ -26,6 +26,7 @@ class PlantScan(Base):
 
     rgb_path = Column(String)
     depth_path = Column(String, nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
 
 class PredictionLog(Base):
     __tablename__ = "prediction_logs"
@@ -42,3 +43,36 @@ class PredictionLog(Base):
     weight_est_g = Column(Float)
     A_next_cm2 = Column(Float, nullable=True)
     D_next_cm = Column(Float, nullable=True)
+    
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class Activity(Base):
+    __tablename__ = "activities"
+    id = Column(Integer, primary_key=True, index=True)
+    
+    activity_type = Column(String(50), index=True)
+    title = Column(String(200))
+    description = Column(Text, nullable=True)
+    zone_id = Column(String, index=True, nullable=True)
+    user_id = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=True)
+    meta_data = Column(JSON, nullable=True)
+    timestamp = Column(DateTime(timezone=True), index=True, default=lambda: datetime.now(timezone.utc))
+
+
+class GrowthPrediction(Base):
+    __tablename__ = "growth_predictions"
+    id = Column(Integer, primary_key=True, index=True)
+    
+    plant_id = Column(String(50), index=True)
+    user_id = Column(Integer, nullable=True)
+    date_label = Column(String(50), nullable=True)
+    predicted_weight_g = Column(Float, nullable=True)
+    predicted_area_cm2 = Column(Float, nullable=True)
+    predicted_diameter_cm = Column(Float, nullable=True)
+    change_pct = Column(Float, nullable=True)
+    series_data = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), index=True, default=lambda: datetime.now(timezone.utc))
+
