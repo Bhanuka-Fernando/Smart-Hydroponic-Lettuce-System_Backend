@@ -7,5 +7,6 @@
         "DEEPLAB",
         "sessionmaker",
         "torchvision"
-    ]
+    ],
+    "snyk.advanced.autoSelectOrganization": true
 }
