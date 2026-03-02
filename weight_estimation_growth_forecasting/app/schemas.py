@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from datetime import datetime
 
 class Sensors(BaseModel):
@@ -226,3 +226,20 @@ class PlantDeleteResponse(BaseModel):
     plant_id: str
     deleted_at: str
 
+
+
+
+class GrowthSeries(BaseModel):
+    labels: List[str]
+    actual: List[float]
+    predicted: List[float]
+
+class GrowthPredictSaveRequest(BaseModel):
+    plant_id: str
+    date_label: str
+    predicted_weight_g: float
+    predicted_area_cm2: float
+    predicted_diameter_cm: float
+    change_pct: float = 0.0
+    series: Optional[GrowthSeries] = None
+    insight: Optional[Dict[str, Any]] = None
