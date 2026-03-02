@@ -7,6 +7,8 @@ import os
 import base64
 from typing import Optional, List
 from pydantic import ValidationError
+from app.schemas import GrowthPredictSaveRequest
+from app.core.db_models import GrowthPredictionLog
 
 from app.core.db_deps import get_db
 from app.core.db_models import SensorReading, PlantScan, PredictionLog, Activity
@@ -576,3 +578,20 @@ def get_activities_history(
         total_count=total_count,
         has_more=has_more,
     )
+
+
+@router.post("/growth/predict/save")
+def save_growth_prediction(payload: GrowthPredictSaveRequest, db: Session = Depends(get_db)):
+    row = GrowthPredictionLog(
+        plant_id=payload.plant_id,
+        date_label=payload.date_label,
+        predicted_weight_g=float(payload.predicted_weight_g),
+        predicted_area_cm2=float(payload.predicted_area_cm2),
+        predicted_diameter_cm=float(payload.predicted_diameter_cm),
+        change_pct=float(payload.change_pct or 0.0),
+        series=payload.series.model_dump() if payload.series else None,
+        insight=payload.insight,
+    )
+    db.add(row)
+    db.commit()
+    return {"ok": True}
