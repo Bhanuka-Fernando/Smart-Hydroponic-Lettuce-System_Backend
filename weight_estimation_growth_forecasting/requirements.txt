@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+pydantic-settings
+python-jose[cryptography]
+numpy
+torch
+torchvision
+opencv-python
+scikit-learn 
+joblib
+pandas
+sqlalchemy
+psycopg2-binary
+python-multipart
+requests
