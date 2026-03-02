@@ -76,3 +76,22 @@ class GrowthPrediction(Base):
     series_data = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), index=True, default=lambda: datetime.now(timezone.utc))
 
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
+from datetime import datetime
+
+class GrowthPredictionLog(Base):
+    __tablename__ = "growth_prediction_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plant_id = Column(String, index=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+
+    date_label = Column(String, nullable=False)
+    predicted_weight_g = Column(Float, nullable=False)
+    predicted_area_cm2 = Column(Float, nullable=False)
+    predicted_diameter_cm = Column(Float, nullable=False)
+    change_pct = Column(Float, nullable=False)
+
+    series = Column(JSON, nullable=True)
+    insight = Column(JSON, nullable=True)
+
