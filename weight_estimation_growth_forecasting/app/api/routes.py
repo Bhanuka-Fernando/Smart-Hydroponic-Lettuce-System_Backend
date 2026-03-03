@@ -1,14 +1,14 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import base64
 from typing import Optional, List
 from pydantic import ValidationError
 from app.schemas import GrowthPredictSaveRequest
-from app.core.db_models import GrowthPredictionLog
+from app.core.db_models import GrowthPredictionLog, PlantMeta
 
 from app.core.db_deps import get_db
 from app.core.db_models import SensorReading, PlantScan, PredictionLog, Activity
@@ -122,22 +122,6 @@ async def infer_today(
         A_prev_cm2=A_prev,
         sensors=means,
     )
-
-    # 9) store prediction log
-    db.add(
-        PredictionLog(
-            plant_id=payload.plant_id,
-            zone_id=payload.zone_id,
-            ts=datetime.utcnow(),
-            A_proj_cm2=float(A_proj_cm2),
-            D_proj_cm=float(D_proj_cm),
-            A_leaf_est_cm2=float(A_des_cm2),
-            weight_est_g=float(W_today_g),
-            A_next_cm2=float(A_tmr),
-            D_next_cm=float(D_tmr),
-        )
-    )
-    db.commit()
 
     # 10) compute tomorrow weight
     A_leaf_tmr = leaf_area_from_proj(A_tmr, D_tmr)
@@ -442,6 +426,18 @@ def dashboard_latest(zone_id: str, plant_id: str, db: Session = Depends(get_db))
 
 @router.post("/weights/save")
 def save_weight_result(payload: WeightSaveRequest, db: Session = Depends(get_db)):
+    existing = (
+        db.query(PredictionLog)
+        .filter(
+            PredictionLog.plant_id == payload.plant_id,
+            PredictionLog.zone_id == payload.zone_id,
+            PredictionLog.ts == payload.captured_at,
+        )
+        .first()
+    )
+    if existing:
+        return {"ok": True, "deduped": True}
+
     row = PredictionLog(
         plant_id=payload.plant_id,
         zone_id=payload.zone_id,
@@ -454,68 +450,113 @@ def save_weight_result(payload: WeightSaveRequest, db: Session = Depends(get_db)
         D_next_cm=None,
     )
     db.add(row)
-    
-    # Log activity
-    activity = Activity(
-        activity_type="weight_scan",
-        title=f"Weight scan for {payload.plant_id}",
-        description=f"Weight: {payload.W_today_g:.1f}g, Area: {payload.A_proj_cm2:.1f} cm²",
-        zone_id=payload.zone_id,
-        status="success",
-    )
-    db.add(activity)
-    
     db.commit()
     return {"ok": True}
-
 
 @router.get("/plants/{plant_id}", response_model=PlantDetailsResponse)
 def get_plant_details(
     plant_id: str,
     zone_id: str | None = None,
+    range: str = Query("7d", pattern="^(7d|month|all)$"),
     db: Session = Depends(get_db),
 ):
+    # ---- meta (age + planted_on) ----
+    meta_q = db.query(PlantMeta).filter(PlantMeta.plant_id == plant_id)
+    if zone_id:
+        meta_q = meta_q.filter(PlantMeta.zone_id == zone_id)
+    meta = meta_q.first()
+
+    planted_at = meta.planted_at if meta else None
+    if planted_at:
+        age_days = max(0, (datetime.utcnow().date() - planted_at.date()).days)
+        planted_on = f"Planted {planted_at.strftime('%b %d')}"
+    else:
+        age_days = 0
+        planted_on = "Planted --"
+
+    # ---- logs (real scans) ----
     q = db.query(PredictionLog).filter(PredictionLog.plant_id == plant_id)
     if zone_id:
         q = q.filter(PredictionLog.zone_id == zone_id)
 
-    logs = q.order_by(PredictionLog.ts.asc()).limit(200).all()
-    if not logs:
-        raise HTTPException(status_code=404, detail="No records for this plant_id")
+    if range == "7d":
+        q = q.filter(PredictionLog.ts >= (datetime.utcnow() - timedelta(days=7)))
+    elif range == "month":
+        q = q.filter(PredictionLog.ts >= (datetime.utcnow() - timedelta(days=30)))
 
+    logs = q.order_by(PredictionLog.ts.asc()).all()
+
+    # ✅ if no scans yet, fallback to GrowthPredictionLog (prediction-only plants)
+    if not logs:
+        pred_q = db.query(GrowthPredictionLog).filter(GrowthPredictionLog.plant_id == plant_id)
+        pred = pred_q.order_by(desc(GrowthPredictionLog.id)).first()
+
+        if not pred and not meta:
+            raise HTTPException(status_code=404, detail="No records for this plant_id")
+
+        start_w = 0.0
+        current_w = float(getattr(pred, "predicted_weight_g", 0.0) or 0.0) if pred else 0.0
+        growth_pct = 0.0
+
+        history = []
+        if pred:
+            history = [
+                PlantHistoryItem(
+                    date=datetime.utcnow().date().isoformat(),
+                    date_label=_date_label(datetime.utcnow()),
+                    actual_weight_g=None,
+                    predicted_weight_g=float(getattr(pred, "predicted_weight_g", 0.0) or 0.0),
+                    delta_g=None,
+                    status="Predicted",
+                )
+            ]
+
+        return PlantDetailsResponse(
+            plant_id=plant_id,
+            display_name=f"Plant {plant_id}",
+            planted_on=planted_on,
+            age_days=age_days,
+            start_weight_g=round(start_w, 2),
+            current_weight_g=round(current_w, 2),
+            growth_pct=round(growth_pct, 2),
+            predicted_today_g=round(current_w, 2) if pred else None,
+            trajectory={"labels": [], "values": []},
+            history=history,
+        )
+
+    # ---- normal path: we have scans ----
     oldest = logs[0]
     latest = logs[-1]
 
+    # if no PlantMeta, derive planted_at from first scan
+    if not planted_at:
+        planted_at = oldest.ts
+        age_days = max(0, (datetime.utcnow().date() - planted_at.date()).days)
+        planted_on = f"Planted {planted_at.strftime('%b %d')}"
+
     start_w = float(oldest.weight_est_g or 0.0)
     current_w = float(latest.weight_est_g or 0.0)
-
     growth_pct = ((current_w - start_w) / start_w * 100.0) if start_w > 0 else 0.0
-    age_days = max(0, (datetime.utcnow().date() - oldest.ts.date()).days)
-    planted_on = f"Planted {oldest.ts.strftime('%b %d')}"
 
     labels = [l.ts.strftime("%b %d") for l in logs]
     values = [float(l.weight_est_g or 0.0) for l in logs]
 
+    # history (latest first)
     history_forward: list[PlantHistoryItem] = []
-    prev_actual: Optional[float] = None
-
+    prev_actual = None
     for l in logs:
         actual = float(l.weight_est_g) if l.weight_est_g is not None else None
-        delta = None
-        if actual is not None and prev_actual is not None:
-            delta = actual - prev_actual
-
+        delta = (actual - prev_actual) if (actual is not None and prev_actual is not None) else None
         history_forward.append(
             PlantHistoryItem(
                 date=l.ts.date().isoformat(),
                 date_label=_date_label(l.ts),
-                actual_weight_g=actual,
+                actual_weight_g=round(actual, 2) if actual is not None else None,
                 predicted_weight_g=None,
-                delta_g=delta,
+                delta_g=round(delta, 2) if delta is not None else None,
                 status="On Track",
             )
         )
-
         if actual is not None:
             prev_actual = actual
 
@@ -524,14 +565,13 @@ def get_plant_details(
         display_name=f"Plant {plant_id}",
         planted_on=planted_on,
         age_days=age_days,
-        start_weight_g=start_w,
-        current_weight_g=current_w,
-        growth_pct=growth_pct,
+        start_weight_g=round(start_w, 2),
+        current_weight_g=round(current_w, 2),
+        growth_pct=round(growth_pct, 2),
         predicted_today_g=None,
-        trajectory={"labels": labels, "values": values},
-        history=list(reversed(history_forward)),  # latest first for UI
+        trajectory={"labels": labels, "values": [round(v, 2) for v in values]},
+        history=list(reversed(history_forward)),
     )
-
 
 # -------------------------
 # ACTIVITIES HISTORY
@@ -579,9 +619,9 @@ def get_activities_history(
         has_more=has_more,
     )
 
-
 @router.post("/growth/predict/save")
 def save_growth_prediction(payload: GrowthPredictSaveRequest, db: Session = Depends(get_db)):
+    # 1) Save growth prediction log
     row = GrowthPredictionLog(
         plant_id=payload.plant_id,
         date_label=payload.date_label,
@@ -593,5 +633,28 @@ def save_growth_prediction(payload: GrowthPredictSaveRequest, db: Session = Depe
         insight=payload.insight,
     )
     db.add(row)
+
+    # 2) ✅ Update PlantMeta.planted_at based on user entered age_days
+    # planted_at = today - age_days
+    planted_at = datetime.utcnow() - timedelta(days=int(payload.age_days))
+
+    meta = (
+        db.query(PlantMeta)
+        .filter(PlantMeta.plant_id == payload.plant_id, PlantMeta.zone_id == payload.zone_id)
+        .first()
+    )
+
+    if meta is None:
+        meta = PlantMeta(
+            plant_id=payload.plant_id,
+            zone_id=payload.zone_id,
+            planted_at=planted_at,
+            updated_at=datetime.utcnow(),
+        )
+        db.add(meta)
+    else:
+        meta.planted_at = planted_at
+        meta.updated_at = datetime.utcnow()
+
     db.commit()
     return {"ok": True}

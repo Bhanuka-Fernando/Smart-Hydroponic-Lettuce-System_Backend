@@ -237,6 +237,8 @@ class GrowthSeries(BaseModel):
 class GrowthPredictSaveRequest(BaseModel):
     plant_id: str
     date_label: str
+    zone_id: str                  # ✅ add
+    age_days: int 
     predicted_weight_g: float
     predicted_area_cm2: float
     predicted_diameter_cm: float
