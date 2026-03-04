@@ -14,7 +14,10 @@ class Settings(BaseSettings):
     STAGE_META_PATH: str = "artifacts/spoilage_stage_classifier_meta.json"
     REG_MODEL_PATH: str = "artifacts/remaining_days_linear.joblib"
     REG_META_PATH: str = "artifacts/remaining_days_linear_meta.json"
+    SIM_PROBS_CSV: str = "sim_data/remaining_days_inputs_with_probs.csv"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    
 
 settings = Settings()
