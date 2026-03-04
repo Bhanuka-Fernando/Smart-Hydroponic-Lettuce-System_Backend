@@ -150,30 +150,60 @@ class ProbReplaySimulator:
         return random.choice(imgs)
 
     # -------------------------
-    # ✅ UI sampling (NEW)
+    # ✅ UI sampling (UPDATED)
     # -------------------------
     def sample_row(self, plant_id: str | None = None, label: str | None = None) -> dict[str, Any]:
+        """
+        Fallback chain:
+          1) plant + label
+          2) label-only
+          3) plant-only
+          4) random
+        """
         rows = self._load_csv_once()
 
-        filtered = rows
-
+        # normalize inputs
+        want_pid = None
         if plant_id and str(plant_id).strip():
             try:
-                pid_int = plant_str_to_csv_int(plant_id)
-                filtered = [r for r in filtered if int(float(r.get("plant_id", -999))) == pid_int]
+                want_pid = plant_str_to_csv_int(plant_id)
             except Exception:
-                pass
+                want_pid = None
 
+        want_label = None
         if label and str(label).strip():
-            lab = str(label).strip()
-            filtered = [r for r in filtered if (r.get("label") or "").strip() == lab]
+            want_label = str(label).strip()
 
+        def match_pid(r: dict[str, Any]) -> bool:
+            if want_pid is None:
+                return True
+            try:
+                return int(float(r.get("plant_id", -999))) == want_pid
+            except Exception:
+                return False
+
+        def match_label(r: dict[str, Any]) -> bool:
+            if not want_label:
+                return True
+            return (r.get("label") or "").strip() == want_label
+
+        # 1) plant + label
+        filtered = [r for r in rows if match_pid(r) and match_label(r)]
+
+        # 2) label-only
+        if not filtered and want_label:
+            filtered = [r for r in rows if match_label(r)]
+
+        # 3) plant-only
+        if not filtered and want_pid is not None:
+            filtered = [r for r in rows if match_pid(r)]
+
+        # 4) random
         if not filtered:
             filtered = rows
 
         r = random.choice(filtered)
 
-        # parse values
         pid_csv = int(float(r.get("plant_id", 0)))
         plant_str = csv_int_to_plant_str(pid_csv)
 
@@ -183,14 +213,13 @@ class ProbReplaySimulator:
         img_name_csv = (r.get("image_name") or "").strip() or None
         chosen_img = self._pick_existing_image(img_name_csv)
 
-        # return clean dict for API
         return {
             "plant_id": plant_str,
             "plant_id_csv": pid_csv,
             "temperature": temperature,
             "humidity": humidity,
             "label": (r.get("label") or "").strip(),
-            "image_name": chosen_img,  # ✅ ensure exists in sim_images (or None)
+            "image_name": chosen_img,
             "remaining_days": safe_float(r.get("remaining_days"), 0.0),
         }
 
@@ -246,8 +275,6 @@ class ProbReplaySimulator:
                     stage = stage_from_probs(pf, ps, pn, pp)
                     status = make_status(stage, probs)
 
-                    # If you want regressor computed instead of CSV remaining_days:
-                    # remaining = reg.predict(probs, temp, hum)
                     remaining = safe_float(r.get("remaining_days"), 0.0)
 
                     self.state.last_row = {
@@ -259,7 +286,6 @@ class ProbReplaySimulator:
                         "probs": probs,
                     }
 
-                    # insert into DB
                     try:
                         with Session(engine) as session:
                             session.add(
@@ -282,7 +308,6 @@ class ProbReplaySimulator:
                     except Exception as e:
                         print("SIM insert failed:", e)
 
-                    # sleep
                     for _ in range(max(1, interval_sec)):
                         if self._stop_event.is_set():
                             break

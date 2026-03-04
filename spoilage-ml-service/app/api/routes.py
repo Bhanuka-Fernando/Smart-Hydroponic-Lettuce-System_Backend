@@ -2,17 +2,14 @@ from datetime import datetime, timezone
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from app.services.sim_manager import ProbReplaySimulator
-
 from app.db import get_session
 from app.models import SpoilagePrediction
 from app.core.security import require_user
 from app.core.config import settings
-from fastapi import Query
-
 
 from app.schemas import (
     SpoilagePredictResponse,
@@ -34,6 +31,19 @@ reg = RemainingDaysRegressor(settings.REG_MODEL_PATH, settings.REG_META_PATH)
 
 # ✅ simulator singleton
 sim = ProbReplaySimulator(settings.SIM_PROBS_CSV)
+
+STAGE_ORDER = ["fresh", "slightly_aged", "near_spoilage", "spoiled"]
+
+
+def _advance_stage_by_days(current: str | None, days: int) -> str | None:
+    if not current:
+        return None
+    cur = current.strip().lower()
+    if cur not in STAGE_ORDER:
+        return None
+    i = STAGE_ORDER.index(cur)
+    j = min(i + max(0, days), len(STAGE_ORDER) - 1)
+    return STAGE_ORDER[j]
 
 
 @router.get("/health")
@@ -77,7 +87,7 @@ async def spoilage_predict(
     remaining = reg.predict(probs, temperature, humidity)
     status = make_status(stage, probs)
 
-    # ✅ SAVE TO DB (do not break response if insert fails)
+    # ✅ SAVE TO DB
     try:
         try:
             dt = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
@@ -96,7 +106,7 @@ async def spoilage_predict(
             p_slightly_aged=float(probs["slightly_aged"]),
             p_near_spoilage=float(probs["near_spoilage"]),
             p_spoiled=float(probs["spoiled"]),
-            image_url=image_url,  # ✅ IMPORTANT
+            image_url=image_url,
         )
         session.add(row)
         session.commit()
@@ -218,17 +228,70 @@ def sim_stop(user=Depends(require_user)):
 def sim_status(user=Depends(require_user)):
     return sim.status()
 
-from fastapi import Query
 
 @router.get("/sim/sample")
 def sim_sample(
+    session: Session = Depends(get_session),
     plant_id: str | None = Query(default=None),
     label: str | None = Query(default=None),
+
+    # ✅ random | time
+    mode: str = Query(default="random"),
+
+    # ✅ optional override to test "after days"
+    now_iso: str | None = Query(default=None),
+
     user=Depends(require_user),
 ):
-    row = sim.sample_row(plant_id=plant_id, label=label)
+    """
+    mode:
+      - random: random row (optionally filtered by plant_id/label)
+      - time: progress label based on days since latest DB captured_at for that plant
+    """
 
-    # If no image exists, image_url will be None
+    pid = None
+    if plant_id:
+        try:
+            pid = normalize_plant_id(plant_id)
+        except ValueError:
+            pid = plant_id
+
+    chosen_label = label
+
+    # choose "now"
+    if now_iso:
+        try:
+            now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+        except Exception:
+            now = datetime.now(timezone.utc)
+    else:
+        now = datetime.now(timezone.utc)
+
+    if mode == "time" and pid:
+        stmt = (
+            select(SpoilagePrediction)
+            .where(SpoilagePrediction.plant_id == pid)
+            .order_by(SpoilagePrediction.id.desc())
+            .limit(1)
+        )
+        last = session.exec(stmt).first()
+
+        if not last:
+            chosen_label = "fresh"
+        else:
+            last_dt = last.captured_at
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+
+            delta_days = int((now - last_dt).total_seconds() // 86400)
+            progressed = _advance_stage_by_days(last.stage, delta_days)
+            chosen_label = progressed or last.stage or "fresh"
+
+    # sample with fallbacks (your sample_row already does chain)
+    row = sim.sample_row(plant_id=pid, label=chosen_label)
+
     image_url = f"/sim-images/{row['image_name']}" if row.get("image_name") else None
 
     return {
@@ -239,4 +302,7 @@ def sim_sample(
         "image_name": row.get("image_name"),
         "image_url": image_url,
         "remaining_days": row["remaining_days"],
+        "mode": mode,
+        "picked_label": chosen_label,
+        "now": now.isoformat(),
     }
