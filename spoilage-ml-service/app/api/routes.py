@@ -5,10 +5,14 @@ from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlmodel import Session, select
 
+from app.services.sim_manager import ProbReplaySimulator
+
 from app.db import get_session
 from app.models import SpoilagePrediction
 from app.core.security import require_user
 from app.core.config import settings
+from fastapi import Query
+
 
 from app.schemas import (
     SpoilagePredictResponse,
@@ -27,6 +31,9 @@ router = APIRouter()
 
 clf = SpoilageClassifier(settings.STAGE_MODEL_PATH, settings.STAGE_META_PATH)
 reg = RemainingDaysRegressor(settings.REG_MODEL_PATH, settings.REG_META_PATH)
+
+# ✅ simulator singleton
+sim = ProbReplaySimulator(settings.SIM_PROBS_CSV)
 
 
 @router.get("/health")
@@ -175,3 +182,61 @@ def list_predictions(
 ):
     stmt = select(SpoilagePrediction).order_by(SpoilagePrediction.id.desc()).limit(limit)
     return session.exec(stmt).all()
+
+
+# ==========================
+# ✅ Simulation Endpoints
+# ==========================
+
+@router.post("/sim/start")
+def sim_start(
+    plant_id: str = "P-001",
+    interval_sec: int = 15,
+    loop: bool = False,
+    user=Depends(require_user),
+):
+    """
+    ✅ Do NOT inject DB session here.
+    The simulator runs in a background thread and must create its own Session(engine).
+    """
+    sim.start(
+        plant_id=plant_id,
+        interval_sec=interval_sec,
+        loop=loop,
+        reg=reg,
+    )
+    return {"ok": True, "status": sim.status()}
+
+
+@router.post("/sim/stop")
+def sim_stop(user=Depends(require_user)):
+    sim.stop()
+    return {"ok": True, "status": sim.status()}
+
+
+@router.get("/sim/status")
+def sim_status(user=Depends(require_user)):
+    return sim.status()
+
+from fastapi import Query
+
+@router.get("/sim/sample")
+def sim_sample(
+    plant_id: str | None = Query(default=None),
+    label: str | None = Query(default=None),
+    user=Depends(require_user),
+):
+    row = sim.sample_row(plant_id=plant_id, label=label)
+
+    # If no image exists, image_url will be None
+    image_url = f"/sim-images/{row['image_name']}" if row.get("image_name") else None
+
+    return {
+        "plant_id": row["plant_id"],
+        "temperature": row["temperature"],
+        "humidity": row["humidity"],
+        "label": row["label"],
+        "image_name": row.get("image_name"),
+        "image_url": image_url,
+        "remaining_days": row["remaining_days"],
+    }
