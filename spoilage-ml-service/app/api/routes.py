@@ -234,21 +234,11 @@ def sim_sample(
     session: Session = Depends(get_session),
     plant_id: str | None = Query(default=None),
     label: str | None = Query(default=None),
-
-    # ✅ random | time
-    mode: str = Query(default="random"),
-
-    # ✅ optional override to test "after days"
+    mode: str = Query(default="random"),   # random | time
     now_iso: str | None = Query(default=None),
-
     user=Depends(require_user),
 ):
-    """
-    mode:
-      - random: random row (optionally filtered by plant_id/label)
-      - time: progress label based on days since latest DB captured_at for that plant
-    """
-
+    # normalize plant id
     pid = None
     if plant_id:
         try:
@@ -256,9 +246,7 @@ def sim_sample(
         except ValueError:
             pid = plant_id
 
-    chosen_label = label
-
-    # choose "now"
+    # pick now
     if now_iso:
         try:
             now = datetime.fromisoformat(now_iso.replace("Z", "+00:00"))
@@ -269,28 +257,34 @@ def sim_sample(
     else:
         now = datetime.now(timezone.utc)
 
+    day_id = None
+
     if mode == "time" and pid:
-        stmt = (
+        # ✅ baseline = FIRST scan captured_at for this plant
+        first_stmt = (
             select(SpoilagePrediction)
             .where(SpoilagePrediction.plant_id == pid)
-            .order_by(SpoilagePrediction.id.desc())
+            .order_by(SpoilagePrediction.captured_at.asc())
             .limit(1)
         )
-        last = session.exec(stmt).first()
+        first = session.exec(first_stmt).first()
 
-        if not last:
-            chosen_label = "fresh"
+        if not first:
+            # no baseline yet → day 0
+            day_id = 0
         else:
-            last_dt = last.captured_at
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            base_dt = first.captured_at
+            if base_dt.tzinfo is None:
+                base_dt = base_dt.replace(tzinfo=timezone.utc)
 
-            delta_days = int((now - last_dt).total_seconds() // 86400)
-            progressed = _advance_stage_by_days(last.stage, delta_days)
-            chosen_label = progressed or last.stage or "fresh"
+            delta_days = int((now - base_dt).total_seconds() // 86400)
+            if delta_days < 0:
+                delta_days = 0
 
-    # sample with fallbacks (your sample_row already does chain)
-    row = sim.sample_row(plant_id=pid, label=chosen_label)
+            day_id = delta_days
+
+    # ✅ sample row with day awareness (plant-sticky + deterministic)
+    row = sim.sample_row(plant_id=pid, label=label, day_id=day_id)
 
     image_url = f"/sim-images/{row['image_name']}" if row.get("image_name") else None
 
@@ -299,10 +293,11 @@ def sim_sample(
         "temperature": row["temperature"],
         "humidity": row["humidity"],
         "label": row["label"],
+        "day_id": row.get("day_id"),
+        "capture_date": row.get("capture_date"),
         "image_name": row.get("image_name"),
         "image_url": image_url,
         "remaining_days": row["remaining_days"],
         "mode": mode,
-        "picked_label": chosen_label,
         "now": now.isoformat(),
     }
