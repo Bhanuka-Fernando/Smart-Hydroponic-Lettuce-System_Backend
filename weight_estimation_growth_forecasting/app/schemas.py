@@ -121,6 +121,34 @@ class PlantHistoryItem(BaseModel):
     status: str  # "Scanned" | "Predicted" | "On Track" etc.
 
 
+class ScanItem(BaseModel):
+    """Detailed scan record with all weight information"""
+    id: int
+    ts: datetime
+    created_at: datetime
+    weight_g: float
+    actual_weight_g: float
+    predicted_weight_g: Optional[float] = None
+    age_days: int
+    area_cm2: Optional[float] = None
+    diameter_cm: Optional[float] = None
+    status: str = "Scanned"
+    image_url: Optional[str] = None
+
+
+class GrowthPredictionItem(BaseModel):
+    """Growth prediction/forecast data"""
+    id: int
+    date: str
+    date_label: str
+    predicted_weight_g: float
+    predicted_area_cm2: float
+    predicted_diameter_cm: float
+    age_days: int
+    change_pct: float
+    created_at: datetime
+
+
 class PlantDetailsResponse(BaseModel):
     plant_id: str
     display_name: str
@@ -131,7 +159,9 @@ class PlantDetailsResponse(BaseModel):
     growth_pct: float
     predicted_today_g: Optional[float] = None
     trajectory: Optional[dict] = None  # {labels:[], values:[]}
-    history: Optional[List[PlantHistoryItem]] = None
+    scans: Optional[List[ScanItem]] = None  # ✅ NEW: Detailed scan records
+    growth_predictions: Optional[List[GrowthPredictionItem]] = None  # ✅ NEW: Growth predictions
+    history: Optional[List[PlantHistoryItem]] = None  # Combined view for backward compatibility
 
 class WeightSaveRequest(BaseModel):
     plant_id: str

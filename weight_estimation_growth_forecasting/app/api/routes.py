@@ -24,6 +24,8 @@ from app.schemas import (
     WeightSaveRequest,
     PlantDetailsResponse,
     PlantHistoryItem,
+    ScanItem,
+    GrowthPredictionItem,
     DashboardMetricsResponse,
     IoTSensorPayload,
     IoTIngestResponse,
@@ -592,6 +594,29 @@ def get_plant_details(
         
         growth_pct = ((current_w - start_w) / start_w * 100.0) if start_w > 0 else 0.0
 
+        # ✅ GET ALL GROWTH PREDICTIONS for this plant
+        growth_predictions_list: list[GrowthPredictionItem] = []
+        all_growth_preds = (
+            db.query(GrowthPredictionLog)
+            .filter(GrowthPredictionLog.plant_id == plant_id)
+            .order_by(desc(GrowthPredictionLog.created_at))
+            .all()
+        )
+        for gp in all_growth_preds:
+            growth_predictions_list.append(
+                GrowthPredictionItem(
+                    id=gp.id,
+                    date=gp.created_at.date().isoformat(),
+                    date_label=gp.date_label,
+                    predicted_weight_g=float(gp.predicted_weight_g),
+                    predicted_area_cm2=float(gp.predicted_area_cm2),
+                    predicted_diameter_cm=float(gp.predicted_diameter_cm),
+                    age_days=age_days,
+                    change_pct=float(gp.change_pct),
+                    created_at=gp.created_at,
+                )
+            )
+
         history = []
         if pred:
             history = [
@@ -616,6 +641,8 @@ def get_plant_details(
             growth_pct=round(growth_pct, 2),
             predicted_today_g=round(current_w, 2) if pred else None,
             trajectory={"labels": [], "values": []},
+            scans=[],  # ✅ NEW: Empty scans array for prediction-only plants
+            growth_predictions=growth_predictions_list,  # ✅ NEW: Growth predictions
             history=history,
         )
 
@@ -646,7 +673,62 @@ def get_plant_details(
     labels = [l.ts.strftime("%b %d") for l in logs]
     values = [float(l.weight_est_g or 0.0) for l in logs]
 
-    # ✅ history - ALL scans with age_days and proper status
+    # ✅ BUILD SCANS ARRAY - Detailed scan records
+    scans_list: list[ScanItem] = []
+    for l in logs:
+        scan_age_days = max(0, (l.ts.date() - planted_at.date()).days) if planted_at else 0
+        weight_g = float(l.weight_est_g or 0.0)
+        
+        # Get associated plant_scan for image
+        plant_scan = (
+            db.query(PlantScan)
+            .filter(PlantScan.plant_id == plant_id, PlantScan.ts == l.ts)
+            .first()
+        )
+        
+        scans_list.append(
+            ScanItem(
+                id=l.id,
+                ts=l.ts,
+                created_at=l.ts,  # Use ts as created_at
+                weight_g=weight_g,
+                actual_weight_g=weight_g,
+                predicted_weight_g=weight_g,  # For scans, predicted = actual
+                age_days=scan_age_days,
+                area_cm2=float(l.A_leaf_est_cm2 or 0.0),
+                diameter_cm=float(l.D_proj_cm or 0.0),
+                status="Scanned",
+                image_url=plant_scan.rgb_path if plant_scan else None,
+            )
+        )
+
+    # ✅ GET GROWTH PREDICTIONS
+    growth_predictions_list: list[GrowthPredictionItem] = []
+    growth_preds = (
+        db.query(GrowthPredictionLog)
+        .filter(GrowthPredictionLog.plant_id == plant_id)
+        .order_by(desc(GrowthPredictionLog.created_at))
+        .all()
+    )
+    for gp in growth_preds:
+        # Calculate age_days for prediction date
+        pred_age_days = age_days  # Use current age as default
+        
+        growth_predictions_list.append(
+            GrowthPredictionItem(
+                id=gp.id,
+                date=gp.created_at.date().isoformat(),
+                date_label=gp.date_label,
+                predicted_weight_g=float(gp.predicted_weight_g),
+                predicted_area_cm2=float(gp.predicted_area_cm2),
+                predicted_diameter_cm=float(gp.predicted_diameter_cm),
+                age_days=pred_age_days,
+                change_pct=float(gp.change_pct),
+                created_at=gp.created_at,
+            )
+        )
+
+    # ✅ history - ALL scans with age_days and proper status (backward compatibility)
     history_forward: list[PlantHistoryItem] = []
     prev_actual = None
     for l in logs:
@@ -680,6 +762,8 @@ def get_plant_details(
         growth_pct=round(growth_pct, 2),
         predicted_today_g=None,
         trajectory={"labels": labels, "values": [round(v, 2) for v in values]},
+        scans=scans_list,  # ✅ NEW: Detailed scan records
+        growth_predictions=growth_predictions_list,  # ✅ NEW: Growth predictions
         history=list(reversed(history_forward)),
     )
 

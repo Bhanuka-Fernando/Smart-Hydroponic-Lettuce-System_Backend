@@ -39,12 +39,17 @@ def list_plants(
     metas = q_meta.all()
     meta_keys = {(m.plant_id, m.zone_id or "") for m in metas}
 
-    # ✅ Also get plants that only have growth predictions (no scans or meta yet)
-    q_growth_preds = db.query(GrowthPredictionLog).distinct(GrowthPredictionLog.plant_id)
-    growth_pred_plants = q_growth_preds.all()
-    growth_pred_keys = {(gp.plant_id, "") for gp in growth_pred_plants}
+    # Get all plant_ids that already exist in logs or meta
+    existing_plant_ids = {plant_id for plant_id, _ in latest_by_plant.keys()} | {plant_id for plant_id, _ in meta_keys}
 
-    # Combine all sources (scans + meta + growth predictions)
+    # ✅ Only get plants that ONLY have growth predictions (not in logs or meta)
+    q_growth_preds = db.query(GrowthPredictionLog.plant_id).distinct()
+    growth_pred_plant_ids = {row[0] for row in q_growth_preds.all()}
+    # Filter out plants that already exist in other sources
+    growth_only_plant_ids = growth_pred_plant_ids - existing_plant_ids
+    growth_pred_keys = {(pid, "") for pid in growth_only_plant_ids}
+
+    # Combine all sources (scans + meta + growth predictions that don't overlap)
     all_keys = set(latest_by_plant.keys()) | meta_keys | growth_pred_keys
 
     out: list[PlantListItem] = []
