@@ -39,8 +39,13 @@ def list_plants(
     metas = q_meta.all()
     meta_keys = {(m.plant_id, m.zone_id or "") for m in metas}
 
-    # Combine both sources (scans + meta)
-    all_keys = set(latest_by_plant.keys()) | meta_keys
+    # ✅ Also get plants that only have growth predictions (no scans or meta yet)
+    q_growth_preds = db.query(GrowthPredictionLog).distinct(GrowthPredictionLog.plant_id)
+    growth_pred_plants = q_growth_preds.all()
+    growth_pred_keys = {(gp.plant_id, "") for gp in growth_pred_plants}
+
+    # Combine all sources (scans + meta + growth predictions)
+    all_keys = set(latest_by_plant.keys()) | meta_keys | growth_pred_keys
 
     out: list[PlantListItem] = []
 
@@ -123,11 +128,11 @@ def list_plants(
 
 @router.delete("/{plant_id}", response_model=PlantDeleteResponse)
 def delete_plant(plant_id: str, db: Session = Depends(get_db)):
-    """Soft delete a plant - marks all related records as deleted"""
+    """Soft/hard delete a plant - removes all related records including growth predictions"""
     plant_id = plant_id.strip()
     now = datetime.now(timezone.utc)
 
-    # Check if plant exists
+    # Check if plant exists in any table
     meta = db.query(PlantMeta).filter(PlantMeta.plant_id == plant_id).first()
     logs = db.query(PredictionLog).filter(
         PredictionLog.plant_id == plant_id,
@@ -137,11 +142,14 @@ def delete_plant(plant_id: str, db: Session = Depends(get_db)):
         PlantScan.plant_id == plant_id,
         PlantScan.deleted_at.is_(None)
     ).all()
+    growth_preds = db.query(GrowthPredictionLog).filter(
+        GrowthPredictionLog.plant_id == plant_id
+    ).all()
 
-    if not meta and not logs and not scans:
+    if not meta and not logs and not scans and not growth_preds:
         raise HTTPException(status_code=404, detail=f"Plant {plant_id} not found")
 
-    # ✅ Soft delete: Set deleted_at timestamp
+    # ✅ Soft delete: Set deleted_at timestamp for scan/prediction logs
     # Mark all PredictionLog entries as deleted
     db.query(PredictionLog).filter(
         PredictionLog.plant_id == plant_id
@@ -152,9 +160,13 @@ def delete_plant(plant_id: str, db: Session = Depends(get_db)):
         PlantScan.plant_id == plant_id
     ).update({"deleted_at": now})
     
-    # Delete PlantMeta (or could add deleted_at field if needed)
+    # ✅ Hard delete: Remove PlantMeta and GrowthPredictionLog entries
     if meta:
         db.delete(meta)
+    
+    # Delete all growth predictions for this plant
+    for growth_pred in growth_preds:
+        db.delete(growth_pred)
 
     db.commit()
 

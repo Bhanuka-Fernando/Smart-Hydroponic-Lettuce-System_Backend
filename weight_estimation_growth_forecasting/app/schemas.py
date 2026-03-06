@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict
 from datetime import datetime
 
@@ -11,7 +11,7 @@ class Sensors(BaseModel):
 class InferRequest(BaseModel):
     plant_id: str
     zone_id: str
-    dap: int
+    dap: int = Field(ge=0, description="Days after planting (must be >= 0)")
     sensors: Optional[Sensors] = None
     A_prev_cm2: Optional[float] = None
 
@@ -24,15 +24,20 @@ class InferResponse(BaseModel):
     D_proj_tmr_cm: float
     W_tmr_g: float
     mask_overlay_b64: Optional[str] = None
+    # Optional frontend-requested fields
+    image_url: Optional[str] = None
+    captured_at: Optional[str] = None
+    plant_id: Optional[str] = None
+    zone_id: Optional[str] = None
 
 class ForecastRequest(BaseModel):
     plant_id: str
     zone_id: str
-    dap: int
-    n_days: int
+    dap: int = Field(ge=0, description="Days after planting (must be >= 0)")
+    n_days: int = Field(ge=1, le=365, description="Number of days to forecast (1-365)")
     A_prev_cm2: Optional[float] = None 
-    A_t_cm2: float
-    D_t_cm: float
+    A_t_cm2: float = Field(gt=0, description="Current projected area (must be > 0)")
+    D_t_cm: float = Field(gt=0, description="Current diameter (must be > 0)")
     sensors: Optional[Any] = None
 
 class ForecastPoint(BaseModel):

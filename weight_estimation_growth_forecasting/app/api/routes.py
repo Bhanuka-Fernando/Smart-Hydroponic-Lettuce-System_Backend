@@ -221,6 +221,10 @@ async def infer_today(
         D_proj_tmr_cm=D_tmr,
         W_tmr_g=W_tmr_g,
         mask_overlay_b64=mask_b64,
+        image_url=rgb_path if 'rgb_path' in locals() else None,
+        captured_at=now.isoformat() if 'now' in locals() else None,
+        plant_id=payload.plant_id,
+        zone_id=payload.zone_id,
     )
 
 
@@ -724,43 +728,3 @@ def get_activities_history(
         total_count=total_count,
         has_more=has_more,
     )
-
-@router.post("/growth/predict/save")
-def save_growth_prediction(payload: GrowthPredictSaveRequest, db: Session = Depends(get_db)):
-    # 1) Save growth prediction log
-    row = GrowthPredictionLog(
-        plant_id=payload.plant_id,
-        date_label=payload.date_label,
-        predicted_weight_g=float(payload.predicted_weight_g),
-        predicted_area_cm2=float(payload.predicted_area_cm2),
-        predicted_diameter_cm=float(payload.predicted_diameter_cm),
-        change_pct=float(payload.change_pct or 0.0),
-        series=payload.series.model_dump() if payload.series else None,
-        insight=payload.insight,
-    )
-    db.add(row)
-
-    # 2) ✅ Update PlantMeta.planted_at based on user entered age_days
-    # planted_at = today - age_days
-    planted_at = datetime.utcnow() - timedelta(days=int(payload.age_days))
-
-    meta = (
-        db.query(PlantMeta)
-        .filter(PlantMeta.plant_id == payload.plant_id, PlantMeta.zone_id == payload.zone_id)
-        .first()
-    )
-
-    if meta is None:
-        meta = PlantMeta(
-            plant_id=payload.plant_id,
-            zone_id=payload.zone_id,
-            planted_at=planted_at,
-            updated_at=datetime.utcnow(),
-        )
-        db.add(meta)
-    else:
-        meta.planted_at = planted_at
-        meta.updated_at = datetime.utcnow()
-
-    db.commit()
-    return {"ok": True}
