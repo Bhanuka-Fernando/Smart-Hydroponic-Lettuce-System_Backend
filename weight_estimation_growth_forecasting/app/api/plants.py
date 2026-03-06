@@ -19,8 +19,8 @@ def list_plants(
     zone_id: str | None = None,
     db: Session = Depends(get_db),
 ):
-    # latest scan/log per plant (PredictionLog)
-    q_logs = db.query(PredictionLog)
+    # latest scan/log per plant (PredictionLog) - exclude deleted
+    q_logs = db.query(PredictionLog).filter(PredictionLog.deleted_at.is_(None))
     if zone_id:
         q_logs = q_logs.filter(PredictionLog.zone_id == zone_id)
 
@@ -32,13 +32,14 @@ def list_plants(
         if key not in latest_by_plant:
             latest_by_plant[key] = r
 
-    # plants created by growth save (PlantMeta)
+    # Plants from PlantMeta (includes growth prediction-only plants)
     q_meta = db.query(PlantMeta)
     if zone_id:
         q_meta = q_meta.filter(PlantMeta.zone_id == zone_id)
     metas = q_meta.all()
     meta_keys = {(m.plant_id, m.zone_id or "") for m in metas}
 
+    # Combine both sources (scans + meta)
     all_keys = set(latest_by_plant.keys()) | meta_keys
 
     out: list[PlantListItem] = []
@@ -62,7 +63,10 @@ def list_plants(
         else:
             first_log = (
                 db.query(PredictionLog)
-                .filter(PredictionLog.plant_id == plant_id)
+                .filter(
+                    PredictionLog.plant_id == plant_id,
+                    PredictionLog.deleted_at.is_(None)
+                )
                 .order_by(PredictionLog.ts.asc())
                 .first()
             )
@@ -119,23 +123,39 @@ def list_plants(
 
 @router.delete("/{plant_id}", response_model=PlantDeleteResponse)
 def delete_plant(plant_id: str, db: Session = Depends(get_db)):
+    """Soft delete a plant - marks all related records as deleted"""
     plant_id = plant_id.strip()
+    now = datetime.now(timezone.utc)
 
+    # Check if plant exists
     meta = db.query(PlantMeta).filter(PlantMeta.plant_id == plant_id).first()
-    logs = db.query(PredictionLog).filter(PredictionLog.plant_id == plant_id).all()
-    scans = db.query(PlantScan).filter(PlantScan.plant_id == plant_id).all()
+    logs = db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id,
+        PredictionLog.deleted_at.is_(None)
+    ).all()
+    scans = db.query(PlantScan).filter(
+        PlantScan.plant_id == plant_id,
+        PlantScan.deleted_at.is_(None)
+    ).all()
 
     if not meta and not logs and not scans:
         raise HTTPException(status_code=404, detail=f"Plant {plant_id} not found")
 
+    # ✅ Soft delete: Set deleted_at timestamp
+    # Mark all PredictionLog entries as deleted
+    db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id
+    ).update({"deleted_at": now, "updated_at": now})
+    
+    # Mark all PlantScan entries as deleted
+    db.query(PlantScan).filter(
+        PlantScan.plant_id == plant_id
+    ).update({"deleted_at": now})
+    
+    # Delete PlantMeta (or could add deleted_at field if needed)
     if meta:
         db.delete(meta)
-    for s in scans:
-        db.delete(s)
-    for l in logs:
-        db.delete(l)
 
     db.commit()
 
-    now = datetime.now(timezone.utc)
     return PlantDeleteResponse(ok=True, plant_id=plant_id, deleted_at=now.isoformat())

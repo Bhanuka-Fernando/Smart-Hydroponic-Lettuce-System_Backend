@@ -111,8 +111,9 @@ class PlantHistoryItem(BaseModel):
     date_label: str
     actual_weight_g: Optional[float] = None
     predicted_weight_g: Optional[float] = None
+    age_days: Optional[int] = None
     delta_g: Optional[float] = None
-    status: str  # "On Track" etc.
+    status: str  # "Scanned" | "Predicted" | "On Track" etc.
 
 
 class PlantDetailsResponse(BaseModel):
