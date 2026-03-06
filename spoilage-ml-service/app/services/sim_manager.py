@@ -1,8 +1,6 @@
-# app/services/sim_manager.py
 from __future__ import annotations
 
 import csv
-import random
 import threading
 import time
 from dataclasses import dataclass
@@ -10,18 +8,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from app.db import engine
 from app.models import SpoilagePrediction
 from app.services.postprocess import make_status
 
 STAGES = ["fresh", "slightly_aged", "near_spoilage", "spoiled"]
+STAGE_RANK = {s: i for i, s in enumerate(STAGES)}
 
 
 def plant_str_to_csv_int(plant_id: str) -> int:
-    s = str(plant_id).strip()
-    if s.upper().startswith("P-"):
+    s = str(plant_id).strip().upper()
+    if s.startswith("SIM-"):
+        s = s[4:]
+    if s.startswith("P-"):
         n = int(s.split("-")[1])
         return max(0, n - 1)
     return int(float(s))
@@ -50,6 +51,23 @@ def stage_from_probs(pf: float, ps: float, pn: float, pp: float) -> str:
     return max(probs, key=probs.get)
 
 
+def preferred_labels_for_day(day_id: int | None) -> list[str]:
+    if day_id is None or day_id <= 0:
+        return ["fresh", "slightly_aged"]
+    if day_id == 1:
+        return ["slightly_aged", "near_spoilage"]
+    if day_id == 2:
+        return ["near_spoilage", "spoiled"]
+    return ["spoiled"]
+
+
+def stable_index(key: str, n: int) -> int:
+    acc = 0
+    for ch in key:
+        acc = (acc * 131 + ord(ch)) % 2_147_483_647
+    return acc % n if n > 0 else 0
+
+
 @dataclass
 class SimState:
     running: bool = False
@@ -64,6 +82,13 @@ class ProbReplaySimulator:
     """
     Replays rows from SIM_PROBS_CSV for a single plant.
     Also provides sample_row() for UI simulation.
+
+    Behavior:
+    - accepts P-001 and SIM-P-001
+    - progression is day-aware
+    - future sim rescans prefer more advanced images/stages
+    - avoids reusing the last sim image if another valid candidate exists
+    - still deterministic for the same plant/day stream
     """
 
     def __init__(self, csv_path: str):
@@ -74,7 +99,9 @@ class ProbReplaySimulator:
         self._rows: list[dict[str, Any]] | None = None
 
         self._sim_images: list[str] | None = None
-        self._sim_images_lower: dict[str, str] | None = None  # lower->real
+        self._sim_images_lower: dict[str, str] | None = None
+
+        self._project_root = Path(__file__).resolve().parents[2]
 
     # -------------------------
     # CSV + Image loading
@@ -84,11 +111,12 @@ class ProbReplaySimulator:
             return self._rows
 
         path = Path(self.csv_path)
+        if not path.is_absolute():
+            path = (self._project_root / path).resolve()
 
         if not path.exists():
             alt1 = Path(str(path).replace("sim_data", "sim-data"))
             alt2 = path.with_name(path.stem + " (2)" + path.suffix)
-
             if alt1.exists():
                 path = alt1
             elif alt2.exists():
@@ -113,14 +141,15 @@ class ProbReplaySimulator:
         if self._sim_images is not None:
             return self._sim_images
 
-        img_dir = Path("sim_images")
-        if not img_dir.exists():
+        img_dir = (self._project_root / "sim_images").resolve()
+
+        if not img_dir.exists() or not img_dir.is_dir():
             self._sim_images = []
             self._sim_images_lower = {}
             return self._sim_images
 
-        imgs = []
-        lower_map = {}
+        imgs: list[str] = []
+        lower_map: dict[str, str] = {}
         for p in img_dir.glob("*"):
             if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png"):
                 imgs.append(p.name)
@@ -132,14 +161,39 @@ class ProbReplaySimulator:
 
     def _resolve_existing_image(self, name: str | None) -> str | None:
         self._load_sim_images_once()
-        if not self._sim_images_lower:
+        if not self._sim_images_lower or not name:
             return None
-        if not name:
+
+        cleaned = str(name).strip().replace("\\", "/").split("/")[-1]
+        return self._sim_images_lower.get(cleaned.lower())
+
+    def _get_last_sim_source_image(self, plant_id: str | None) -> str | None:
+        if not plant_id:
             return None
-        return self._sim_images_lower.get(name.lower())
+
+        try:
+            with Session(engine) as session:
+                stmt = (
+                    select(SpoilagePrediction)
+                    .where(SpoilagePrediction.plant_id == plant_id)
+                    .order_by(SpoilagePrediction.captured_at.desc())
+                    .limit(1)
+                )
+                latest = session.exec(stmt).first()
+                if not latest:
+                    return None
+
+                last_name = getattr(latest, "sim_source_image", None)
+                if not last_name:
+                    return None
+
+                return self._resolve_existing_image(last_name) or last_name
+        except Exception as e:
+            print("Could not read last sim_source_image:", e)
+            return None
 
     # -------------------------
-    # ✅ UI sampling (day-aware, plant-sticky, deterministic)
+    # UI sampling
     # -------------------------
     def sample_row(
         self,
@@ -147,16 +201,6 @@ class ProbReplaySimulator:
         label: str | None = None,
         day_id: int | None = None,
     ) -> dict[str, Any]:
-        """
-        Plant-sticky + day-clamped + deterministic.
-
-        Goals:
-        - If plant_id is provided: NEVER switch to another plant (no cross-plant fallbacks).
-        - If day_id is provided but not available for that plant: clamp to nearest previous day,
-          else min day available.
-        - For the same (plant_id, effective_day_id, label) return a stable image (no random flipping).
-        - Only return images that exist in sim_images (case-insensitive). If none exist -> image_name=None.
-        """
         rows = self._load_csv_once()
         self._load_sim_images_once()
 
@@ -167,8 +211,8 @@ class ProbReplaySimulator:
             except Exception:
                 want_pid = None
 
-        want_label = (str(label).strip() if label and str(label).strip() else None)
-        want_day = (int(day_id) if day_id is not None else None)
+        want_label = (str(label).strip().lower() if label and str(label).strip() else None)
+        want_day = int(day_id) if day_id is not None else None
 
         def pid_of(r: dict[str, Any]) -> int:
             return safe_int(r.get("plant_id", -999), -999)
@@ -177,106 +221,102 @@ class ProbReplaySimulator:
             return safe_int(r.get("day_id", -999), -999)
 
         def label_of(r: dict[str, Any]) -> str:
-            return (r.get("label") or "").strip()
+            return (r.get("label") or "").strip().lower()
 
         def resolved_img_of(r: dict[str, Any]) -> str | None:
             img = (r.get("image_name") or "").strip() or None
             return self._resolve_existing_image(img)
 
-        # 1) Restrict to plant if given
         if want_pid is not None:
             plant_rows = [r for r in rows if pid_of(r) == want_pid]
             if not plant_rows:
-                # Plant not present in CSV -> fall back to any row (but still validate image)
-                r = random.choice(rows)
-                chosen_img = resolved_img_of(r)
-                pid_csv = pid_of(r) if pid_of(r) >= 0 else 0
-                return {
-                    "plant_id": csv_int_to_plant_str(pid_csv),
-                    "plant_id_csv": pid_csv,
-                    "temperature": safe_float(r.get("temperature"), 6.5),
-                    "humidity": safe_float(r.get("humidity"), 91.0),
-                    "label": label_of(r),
-                    "day_id": day_of(r) if day_of(r) >= 0 else 0,
-                    "capture_date": (r.get("capture_date") or "").strip() or None,
-                    "image_name": chosen_img,
-                    "remaining_days": safe_float(r.get("remaining_days"), 0.0),
-                }
+                plant_rows = rows
         else:
             plant_rows = rows
 
-        # 2) Clamp day within this plant
+        available_days = sorted({day_of(r) for r in plant_rows if day_of(r) >= 0})
         effective_day = want_day
-        if effective_day is not None:
-            available_days = sorted({day_of(r) for r in plant_rows if day_of(r) >= 0})
-            if available_days:
-                if effective_day not in available_days:
-                    prev_days = [d for d in available_days if d <= effective_day]
-                    effective_day = max(prev_days) if prev_days else min(available_days)
+
+        if effective_day is None:
+            effective_day = available_days[0] if available_days else 0
+
+        preferred = preferred_labels_for_day(effective_day)
+        last_used_image = self._get_last_sim_source_image(plant_id)
+
+        def score_row(r: dict[str, Any]) -> tuple:
+            d = day_of(r)
+            lbl = label_of(r)
+            img = resolved_img_of(r)
+
+            has_image_penalty = 0 if img else 1
+            label_penalty = 0 if lbl in preferred else 1
+
+            if effective_day is None:
+                day_distance = 0
+                future_bias = 0
             else:
-                effective_day = None
+                day_distance = abs(d - effective_day)
+                future_bias = 0 if d >= effective_day else 1
 
-        # 3) Filter candidates
-        candidates = plant_rows
-        if effective_day is not None:
-            candidates = [r for r in candidates if day_of(r) == effective_day]
+            if want_label:
+                explicit_label_penalty = 0 if lbl == want_label else 1
+            else:
+                explicit_label_penalty = 0
 
-        if want_label:
-            exact = [r for r in candidates if label_of(r) == want_label]
-            if exact:
-                candidates = exact
+            stage_rank = STAGE_RANK.get(lbl, 999)
 
-        if not candidates:
-            # If plant_id given -> fallback inside SAME PLANT only
-            candidates = plant_rows if want_pid is not None else rows
-
-        # 4) Prefer rows that have images
-        with_img: list[tuple[dict[str, Any], str]] = []
-        for r in candidates:
-            resolved = resolved_img_of(r)
-            if resolved:
-                with_img.append((r, resolved))
-
-        # 5) Deterministic pick (stable)
-        def stable_index(key: str, n: int) -> int:
-            acc = 0
-            for ch in key:
-                acc = (acc * 131 + ord(ch)) % 2_147_483_647
-            return acc % n if n > 0 else 0
-
-        key = f"{want_pid}-{effective_day}-{want_label or ''}"
-
-        if with_img:
-            with_img.sort(key=lambda t: (day_of(t[0]), label_of(t[0]), t[1]))
-            idx = stable_index(key, len(with_img))
-            r, chosen_img = with_img[idx]
-        else:
-            candidates.sort(
-                key=lambda r: (pid_of(r), day_of(r), label_of(r), (r.get("image_name") or ""))
+            return (
+                has_image_penalty,
+                explicit_label_penalty,
+                label_penalty,
+                day_distance,
+                future_bias,
+                stage_rank,
             )
-            idx = stable_index(key, len(candidates))
-            r = candidates[idx]
-            chosen_img = None
+
+        scored = [(score_row(r), r, resolved_img_of(r)) for r in plant_rows]
+        scored.sort(key=lambda x: (x[0], x[2] or ""))
+
+        if not scored:
+            raise RuntimeError("No simulation rows available")
+
+        best_score = scored[0][0]
+        best_group = [(r, img) for s, r, img in scored if s == best_score]
+
+        # avoid reusing last image if possible
+        if last_used_image:
+            filtered_group = [
+                (r, img)
+                for r, img in best_group
+                if img and img.lower() != last_used_image.lower()
+            ]
+            if filtered_group:
+                best_group = filtered_group
+
+        # deterministic pick among equally-good remaining candidates
+        best_group.sort(key=lambda t: t[1] or "")
+        key = f"{plant_id or ''}-{effective_day}-{want_label or ''}"
+        idx = stable_index(key, len(best_group))
+        r, chosen_img = best_group[idx]
 
         pid_csv = pid_of(r)
         if pid_csv < 0:
             pid_csv = 0
-        plant_str = csv_int_to_plant_str(pid_csv)
 
         return {
-            "plant_id": plant_str,
+            "plant_id": csv_int_to_plant_str(pid_csv),
             "plant_id_csv": pid_csv,
             "temperature": safe_float(r.get("temperature"), 6.5),
             "humidity": safe_float(r.get("humidity"), 91.0),
             "label": label_of(r),
-            "day_id": day_of(r) if day_of(r) >= 0 else (effective_day or 0),
+            "day_id": day_of(r) if day_of(r) >= 0 else effective_day,
             "capture_date": (r.get("capture_date") or "").strip() or None,
             "image_name": chosen_img,
             "remaining_days": safe_float(r.get("remaining_days"), 0.0),
         }
 
     # -------------------------
-    # Replay logic (existing)
+    # Replay logic
     # -------------------------
     def start(self, *, plant_id: str, interval_sec: int, loop: bool, reg):
         if self.state.running:
@@ -320,7 +360,6 @@ class ProbReplaySimulator:
                     probs = {"fresh": pf, "slightly_aged": ps, "near_spoilage": pn, "spoiled": pp}
                     stage = stage_from_probs(pf, ps, pn, pp)
                     status = make_status(stage, probs)
-
                     remaining = safe_float(r.get("remaining_days"), 0.0)
 
                     self.state.last_row = {
@@ -348,6 +387,7 @@ class ProbReplaySimulator:
                                     p_near_spoilage=float(pn),
                                     p_spoiled=float(pp),
                                     image_url=None,
+                                    sim_source_image=None,
                                 )
                             )
                             session.commit()
