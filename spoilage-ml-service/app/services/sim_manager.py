@@ -51,14 +51,37 @@ def stage_from_probs(pf: float, ps: float, pn: float, pp: float) -> str:
     return max(probs, key=probs.get)
 
 
+def target_stage_for_day(day_id: int | None) -> str:
+    if day_id is None:
+        return "fresh"
+    if day_id <= 0:
+        return "fresh"
+    if day_id <= 1:
+        return "fresh"
+    if day_id <= 3:
+        return "slightly_aged"
+    if day_id <= 6:
+        return "near_spoilage"
+    return "spoiled"
+
+
 def preferred_labels_for_day(day_id: int | None) -> list[str]:
-    if day_id is None or day_id <= 0:
+    if day_id is None:
+        return ["fresh", "slightly_aged", "near_spoilage", "spoiled"]
+
+    if day_id <= 0:
         return ["fresh", "slightly_aged"]
-    if day_id == 1:
+
+    if day_id <= 1:
+        return ["fresh", "slightly_aged"]
+
+    if day_id <= 3:
         return ["slightly_aged", "near_spoilage"]
-    if day_id == 2:
+
+    if day_id <= 6:
         return ["near_spoilage", "spoiled"]
-    return ["spoiled"]
+
+    return ["spoiled", "near_spoilage"]
 
 
 def stable_index(key: str, n: int) -> int:
@@ -86,9 +109,10 @@ class ProbReplaySimulator:
     Behavior:
     - accepts P-001 and SIM-P-001
     - progression is day-aware
-    - future sim rescans prefer more advanced images/stages
+    - prefers rows with a real image
+    - prefers the correct stage for the selected day
     - avoids reusing the last sim image if another valid candidate exists
-    - still deterministic for the same plant/day stream
+    - deterministic among equally-good candidates
     """
 
     def __init__(self, csv_path: str):
@@ -104,7 +128,7 @@ class ProbReplaySimulator:
         self._project_root = Path(__file__).resolve().parents[2]
 
     # -------------------------
-    # CSV + Image loading
+    # CSV + image loading
     # -------------------------
     def _load_csv_once(self) -> list[dict[str, Any]]:
         if self._rows is not None:
@@ -150,6 +174,7 @@ class ProbReplaySimulator:
 
         imgs: list[str] = []
         lower_map: dict[str, str] = {}
+
         for p in img_dir.glob("*"):
             if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg", ".png"):
                 imgs.append(p.name)
@@ -157,7 +182,7 @@ class ProbReplaySimulator:
 
         self._sim_images = imgs
         self._sim_images_lower = lower_map
-        return imgs
+        return self._sim_images
 
     def _resolve_existing_image(self, name: str | None) -> str | None:
         self._load_sim_images_once()
@@ -211,7 +236,11 @@ class ProbReplaySimulator:
             except Exception:
                 want_pid = None
 
-        want_label = (str(label).strip().lower() if label and str(label).strip() else None)
+        want_label = (
+            str(label).strip().lower()
+            if label and str(label).strip()
+            else None
+        )
         want_day = int(day_id) if day_id is not None else None
 
         def pid_of(r: dict[str, Any]) -> int:
@@ -241,6 +270,7 @@ class ProbReplaySimulator:
             effective_day = available_days[0] if available_days else 0
 
         preferred = preferred_labels_for_day(effective_day)
+        target_stage = want_label or target_stage_for_day(effective_day)
         last_used_image = self._get_last_sim_source_image(plant_id)
 
         def score_row(r: dict[str, Any]) -> tuple:
@@ -249,29 +279,27 @@ class ProbReplaySimulator:
             img = resolved_img_of(r)
 
             has_image_penalty = 0 if img else 1
-            label_penalty = 0 if lbl in preferred else 1
+
+            row_rank = STAGE_RANK.get(lbl, 999)
+            target_rank = STAGE_RANK.get(target_stage, 999)
+
+            stage_distance = abs(row_rank - target_rank)
+            preferred_penalty = 0 if lbl in preferred else 1
 
             if effective_day is None:
                 day_distance = 0
-                future_bias = 0
             else:
                 day_distance = abs(d - effective_day)
-                future_bias = 0 if d >= effective_day else 1
 
-            if want_label:
-                explicit_label_penalty = 0 if lbl == want_label else 1
-            else:
-                explicit_label_penalty = 0
-
-            stage_rank = STAGE_RANK.get(lbl, 999)
+            backward_penalty = 1 if row_rank < target_rank else 0
 
             return (
                 has_image_penalty,
-                explicit_label_penalty,
-                label_penalty,
+                stage_distance,
+                preferred_penalty,
+                backward_penalty,
                 day_distance,
-                future_bias,
-                stage_rank,
+                row_rank,
             )
 
         scored = [(score_row(r), r, resolved_img_of(r)) for r in plant_rows]
@@ -283,7 +311,6 @@ class ProbReplaySimulator:
         best_score = scored[0][0]
         best_group = [(r, img) for s, r, img in scored if s == best_score]
 
-        # avoid reusing last image if possible
         if last_used_image:
             filtered_group = [
                 (r, img)
@@ -293,7 +320,6 @@ class ProbReplaySimulator:
             if filtered_group:
                 best_group = filtered_group
 
-        # deterministic pick among equally-good remaining candidates
         best_group.sort(key=lambda t: t[1] or "")
         key = f"{plant_id or ''}-{effective_day}-{want_label or ''}"
         idx = stable_index(key, len(best_group))
@@ -334,7 +360,11 @@ class ProbReplaySimulator:
                 pid_csv = plant_str_to_csv_int(plant_id)
                 rows = self._load_csv_once()
 
-                plant_rows = [r for r in rows if safe_int(r.get("plant_id", -999), -999) == pid_csv]
+                plant_rows = [
+                    r
+                    for r in rows
+                    if safe_int(r.get("plant_id", -999), -999) == pid_csv
+                ]
                 if not plant_rows:
                     plant_rows = rows
 
@@ -357,7 +387,12 @@ class ProbReplaySimulator:
                     pn = safe_float(r.get("p_near_spoilage"), 0.0)
                     pp = safe_float(r.get("p_spoiled"), 0.0)
 
-                    probs = {"fresh": pf, "slightly_aged": ps, "near_spoilage": pn, "spoiled": pp}
+                    probs = {
+                        "fresh": pf,
+                        "slightly_aged": ps,
+                        "near_spoilage": pn,
+                        "spoiled": pp,
+                    }
                     stage = stage_from_probs(pf, ps, pn, pp)
                     status = make_status(stage, probs)
                     remaining = safe_float(r.get("remaining_days"), 0.0)
