@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal
 from pydantic import BaseModel, Field
 
 # ---------- Requests ----------
@@ -13,6 +13,7 @@ class AnalyzeRequest(BaseModel):
     turb_ntu: float
     ec: float
 
+
 class Reading(BaseModel):
     timestamp: str
     ph: float
@@ -20,13 +21,16 @@ class Reading(BaseModel):
     turb_ntu: float
     ec: float
 
+
 class AnalyzeBatchRequest(BaseModel):
     tank_id: str
     readings: List[Reading]
 
+
 class IngestRequest(BaseModel):
     tank_id: str
     readings: List[Reading]
+
 
 # ---------- Responses ----------
 
@@ -46,6 +50,11 @@ class AnalyzeResponse(BaseModel):
     score_status: str
     final_status: str
 
+    # ✅ Main one-liner outputs for UI
+    main_reason: str
+    main_action: str
+
+    # Details (expand/collapsible in UI)
     reasons: List[str]
     actions: List[str]
 
@@ -57,9 +66,11 @@ class AnalyzeResponse(BaseModel):
 
     meta: Dict[str, object] = {}
 
+
 class IngestResponse(BaseModel):
     saved: int
     tank_id: str
+
 
 class LatestResponse(BaseModel):
     tank_id: str
@@ -68,6 +79,7 @@ class LatestResponse(BaseModel):
     temp_c: float
     turb_ntu: float
     ec: float
+
 
 class HistoryResponse(BaseModel):
     tank_id: str

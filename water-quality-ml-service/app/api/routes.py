@@ -8,20 +8,31 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.schemas import (
-    AnalyzeRequest, AnalyzeBatchRequest, AnalyzeResponse,
-    IngestRequest, IngestResponse, LatestResponse, HistoryResponse
+    AnalyzeRequest,
+    AnalyzeBatchRequest,
+    AnalyzeResponse,
+    IngestRequest,
+    IngestResponse,
+    LatestResponse,
+    HistoryResponse,
 )
 from app.core.config import settings
 from app.core.db_deps import get_db
 from app.core.db_models import WaterReading
 from app.services.predictors import DualPredictor
 from app.services.features import build_feature_frame, latest_feature_row, get_turb_delta_30min
-from app.services.rules import water_rule_checks, algae_reasoning, health_score_from_severity
+from app.services.rules import (
+    water_rule_checks,
+    algae_reasoning,
+    health_score_from_severity,
+    pick_main_reason_action,
+)
 from app.services.postprocess import confidence_gate_ml, worst_status, sensor_quality_checks
 
 router = APIRouter(prefix="/water", tags=["water"])
 
 _predictor: Optional[DualPredictor] = None
+
 
 def get_predictor() -> DualPredictor:
     global _predictor
@@ -29,15 +40,18 @@ def get_predictor() -> DualPredictor:
         _predictor = DualPredictor(settings.water_model_path, settings.algae_model_path)
     return _predictor
 
+
 @router.get("/health")
 def health():
     return {"status": "ok", "service": settings.service_name}
+
 
 def parse_ts(ts: str) -> datetime:
     dt = pd.to_datetime(ts, errors="coerce", utc=True)
     if pd.isna(dt):
         raise HTTPException(status_code=400, detail="Invalid timestamp format")
     return dt.to_pydatetime()
+
 
 @router.post("/ingest", response_model=IngestResponse)
 def ingest(req: IngestRequest, db: Session = Depends(get_db)):
@@ -61,6 +75,7 @@ def ingest(req: IngestRequest, db: Session = Depends(get_db)):
     db.commit()
     return IngestResponse(saved=saved, tank_id=req.tank_id.strip())
 
+
 @router.get("/latest", response_model=LatestResponse)
 def latest(tank_id: str = Query(...), db: Session = Depends(get_db)):
     row = (
@@ -81,11 +96,12 @@ def latest(tank_id: str = Query(...), db: Session = Depends(get_db)):
         ec=row.ec,
     )
 
+
 @router.get("/history", response_model=HistoryResponse)
 def history(
     tank_id: str = Query(...),
     limit: int = Query(60, ge=1, le=2000),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     rows = (
         db.query(WaterReading)
@@ -108,10 +124,8 @@ def history(
     ]
     return HistoryResponse(tank_id=tank_id, count=len(out), readings=out)
 
+
 def rows_from_db(tank_id: str, db: Session, minutes: int) -> List[tuple]:
-    """
-    Fetch last N minutes history from DB for single-reading analysis.
-    """
     now = datetime.now(timezone.utc)
     start = now - pd.Timedelta(minutes=minutes)
     rows = (
@@ -122,28 +136,37 @@ def rows_from_db(tank_id: str, db: Session, minutes: int) -> List[tuple]:
         .all()
     )
     return [
-        (r.timestamp.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"), r.ph, r.temp_c, r.turb_ntu, r.ec)
+        (
+            r.timestamp.replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
+            r.ph,
+            r.temp_c,
+            r.turb_ntu,
+            r.ec,
+        )
         for r in rows
     ]
+
 
 @router.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
     predictor = get_predictor()
     tank_id = req.tank_id.strip()
 
-    # Save the incoming reading to DB (so single mode can have history)
+    # Save incoming reading to DB
     dt = parse_ts(req.timestamp)
-    db.add(WaterReading(
-        tank_id=tank_id,
-        timestamp=dt,
-        ph=float(req.ph),
-        temp_c=float(req.temp_c),
-        turb_ntu=float(req.turb_ntu),
-        ec=float(req.ec),
-    ))
+    db.add(
+        WaterReading(
+            tank_id=tank_id,
+            timestamp=dt,
+            ph=float(req.ph),
+            temp_c=float(req.temp_c),
+            turb_ntu=float(req.turb_ntu),
+            ec=float(req.ec),
+        )
+    )
     db.commit()
 
-    # Pull history from DB for rolling features
+    # Pull history for rolling features
     hist_rows = rows_from_db(tank_id, db, minutes=settings.history_minutes)
     if len(hist_rows) < 4:
         raise HTTPException(status_code=400, detail="Not enough history yet. Send more readings or use /analyze_batch.")
@@ -154,7 +177,6 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Not enough resampled points for rolling features (need ~1 hour).")
 
     ml_status, ml_probs, ml_algae, ml_algae_probs = predictor.predict(x)
-
     turb_d2 = get_turb_delta_30min(df_feat)
 
     sensor_quality, sensor_notes = sensor_quality_checks(req.ph, req.temp_c, req.turb_ntu, req.ec)
@@ -172,6 +194,8 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
 
     algae_reasons, algae_actions = algae_reasoning(req.turb_ntu, turb_d2, req.temp_c, req.ec, req.ph)
 
+    main_reason, main_action = pick_main_reason_action(reasons, actions)
+
     return AnalyzeResponse(
         tank_id=tank_id,
         timestamp=req.timestamp,
@@ -184,6 +208,8 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
         health_score=health_score,
         score_status=score_status,
         final_status=final_status,
+        main_reason=main_reason,
+        main_action=main_action,
         reasons=reasons,
         actions=actions,
         algae_reasons=algae_reasons,
@@ -197,6 +223,7 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
             "turb_delta_30min": turb_d2,
         },
     )
+
 
 @router.post("/analyze_batch", response_model=AnalyzeResponse)
 def analyze_batch(req: AnalyzeBatchRequest):
@@ -232,7 +259,8 @@ def analyze_batch(req: AnalyzeBatchRequest):
 
     algae_reasons, algae_actions = algae_reasoning(last_raw.turb_ntu, turb_d2, last_raw.temp_c, last_raw.ec, last_raw.ph)
 
-    # Use latest resampled timestamp
+    main_reason, main_action = pick_main_reason_action(reasons, actions)
+
     latest_time = df_feat["timestamp"].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
     return AnalyzeResponse(
@@ -247,6 +275,8 @@ def analyze_batch(req: AnalyzeBatchRequest):
         health_score=health_score,
         score_status=score_status,
         final_status=final_status,
+        main_reason=main_reason,
+        main_action=main_action,
         reasons=reasons,
         actions=actions,
         algae_reasons=algae_reasons,
