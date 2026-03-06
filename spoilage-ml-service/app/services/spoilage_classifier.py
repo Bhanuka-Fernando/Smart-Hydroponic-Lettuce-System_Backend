@@ -23,10 +23,9 @@ class SpoilageClassifier:
 
         self.model = load_keras_model(model_path)
 
-        # make these practical, not too strict
-        self.min_confidence = 0.60
-        self.min_green_ratio = 0.08
-        self.min_sharpness = 18.0
+        # keep these relaxed
+        self.min_confidence = 0.45
+        self.min_green_ratio = 0.04
 
     def _read_image(self, image_bytes: bytes) -> Image.Image:
         try:
@@ -55,45 +54,29 @@ class SpoilageClassifier:
         g = arr[:, :, 1].astype(np.float32)
         b = arr[:, :, 2].astype(np.float32)
 
-        # simple lettuce-friendly green mask
         green_mask = (
-            (g > 60) &
-            (g > r * 1.08) &
-            (g > b * 1.05)
+            (g > 55) &
+            (g > r * 1.03) &
+            (g > b * 1.02)
         )
 
         green_ratio = float(np.mean(green_mask))
         return green_ratio
 
-    def _estimate_sharpness(self, img: Image.Image) -> float:
-        gray = np.array(img.resize((256, 256)).convert("L"), dtype=np.float32)
-
-        gy, gx = np.gradient(gray)
-        mag = np.sqrt(gx * gx + gy * gy)
-
-        return float(np.mean(mag))
-
     def _validate_image_content(self, img: Image.Image):
         green_ratio = self._estimate_green_ratio(img)
-        sharpness = self._estimate_sharpness(img)
 
         print("VALIDATION green_ratio:", green_ratio)
-        print("VALIDATION sharpness:", sharpness)
 
         if green_ratio < self.min_green_ratio:
             raise ValueError(
                 "Invalid image. Please capture a clear top-view lettuce image only."
             )
 
-        if sharpness < self.min_sharpness:
-            raise ValueError(
-                "Image is too blurry. Please capture a clearer top-view lettuce image."
-            )
-
     def predict(self, image_bytes: bytes, temperature: float, humidity: float) -> tuple[str, dict]:
         img = self._read_image(image_bytes)
 
-        # validate before model prediction
+        # only reject obvious non-lettuce images
         self._validate_image_content(img)
 
         x_img = self._preprocess_image(img)
@@ -124,9 +107,8 @@ class SpoilageClassifier:
         print("SPOILAGE max_conf:", max_conf)
         print("SPOILAGE stage:", stage)
 
+        # do not reject normal lettuce images too aggressively
         if max_conf < self.min_confidence:
-            raise ValueError(
-                "Invalid image. Please capture a clear top-view lettuce image only."
-            )
+            print("Low confidence, but allowing prediction:", max_conf)
 
         return stage, probs_dict
