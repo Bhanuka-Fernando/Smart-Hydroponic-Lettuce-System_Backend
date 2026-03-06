@@ -5,10 +5,12 @@ from io import BytesIO
 
 from .model_loader import load_json, load_keras_model
 
+
 def _softmax(x: np.ndarray) -> np.ndarray:
     x = x - np.max(x)
     e = np.exp(x)
     return e / (np.sum(e) + 1e-9)
+
 
 class SpoilageClassifier:
     def __init__(self, model_path: str, meta_path: str):
@@ -17,40 +19,84 @@ class SpoilageClassifier:
         self.img_w, self.img_h = self.meta["img_size"][0], self.meta["img_size"][1]
 
         self.sensor_mean = np.array(self.meta["sensor_mean"], dtype=np.float32)
-        self.sensor_std  = np.array(self.meta["sensor_std"], dtype=np.float32)
+        self.sensor_std = np.array(self.meta["sensor_std"], dtype=np.float32)
 
         self.model = load_keras_model(model_path)
 
-    def _preprocess_image(self, image_bytes: bytes) -> np.ndarray:
+        # make these practical, not too strict
+        self.min_confidence = 0.60
+        self.min_green_ratio = 0.08
+        self.min_sharpness = 18.0
+
+    def _read_image(self, image_bytes: bytes) -> Image.Image:
         try:
-            print("PREPROCESS image bytes length:", len(image_bytes) if image_bytes else 0)
-            print("PREPROCESS first 20 bytes:", image_bytes[:20])
-
             img = Image.open(BytesIO(image_bytes))
-            print("PREPROCESS image format:", img.format)
-            print("PREPROCESS image mode:", img.mode)
-            print("PREPROCESS image size:", img.size)
-
             img = img.convert("RGB")
-            img = img.resize((self.img_w, self.img_h))
-            x = np.array(img, dtype=np.float32) / 255.0
-            return np.expand_dims(x, axis=0)
-
+            return img
         except UnidentifiedImageError as e:
-            print("PIL could not identify image file. First 50 bytes:", image_bytes[:50])
+            raise ValueError("Uploaded file is not a valid image") from e
+        except Exception as e:
+            print("Image read failed:", repr(e))
             raise ValueError("Uploaded file is not a valid image") from e
 
-        except Exception as e:
-            print("Image preprocessing failed:", repr(e))
-            raise
+    def _preprocess_image(self, img: Image.Image) -> np.ndarray:
+        resized = img.resize((self.img_w, self.img_h))
+        x = np.array(resized, dtype=np.float32) / 255.0
+        return np.expand_dims(x, axis=0)
 
     def _preprocess_sensor(self, temperature: float, humidity: float) -> np.ndarray:
         s = np.array([[float(temperature), float(humidity)]], dtype=np.float32)
         s = (s - self.sensor_mean) / (self.sensor_std + 1e-9)
         return s
 
+    def _estimate_green_ratio(self, img: Image.Image) -> float:
+        arr = np.array(img.resize((256, 256)), dtype=np.uint8)
+        r = arr[:, :, 0].astype(np.float32)
+        g = arr[:, :, 1].astype(np.float32)
+        b = arr[:, :, 2].astype(np.float32)
+
+        # simple lettuce-friendly green mask
+        green_mask = (
+            (g > 60) &
+            (g > r * 1.08) &
+            (g > b * 1.05)
+        )
+
+        green_ratio = float(np.mean(green_mask))
+        return green_ratio
+
+    def _estimate_sharpness(self, img: Image.Image) -> float:
+        gray = np.array(img.resize((256, 256)).convert("L"), dtype=np.float32)
+
+        gy, gx = np.gradient(gray)
+        mag = np.sqrt(gx * gx + gy * gy)
+
+        return float(np.mean(mag))
+
+    def _validate_image_content(self, img: Image.Image):
+        green_ratio = self._estimate_green_ratio(img)
+        sharpness = self._estimate_sharpness(img)
+
+        print("VALIDATION green_ratio:", green_ratio)
+        print("VALIDATION sharpness:", sharpness)
+
+        if green_ratio < self.min_green_ratio:
+            raise ValueError(
+                "Invalid image. Please capture a clear top-view lettuce image only."
+            )
+
+        if sharpness < self.min_sharpness:
+            raise ValueError(
+                "Image is too blurry. Please capture a clearer top-view lettuce image."
+            )
+
     def predict(self, image_bytes: bytes, temperature: float, humidity: float) -> tuple[str, dict]:
-        x_img = self._preprocess_image(image_bytes)
+        img = self._read_image(image_bytes)
+
+        # validate before model prediction
+        self._validate_image_content(img)
+
+        x_img = self._preprocess_image(img)
         x_sens = self._preprocess_sensor(temperature, humidity)
 
         if isinstance(self.model.inputs, (list, tuple)) and len(self.model.inputs) == 2:
@@ -67,6 +113,20 @@ class SpoilageClassifier:
             probs = np.clip(probs, 0.0, 1.0)
             probs = probs / (np.sum(probs) + 1e-9)
 
-        probs_dict = {self.class_names[i]: float(probs[i]) for i in range(len(self.class_names))}
+        max_conf = float(np.max(probs))
+        probs_dict = {
+            self.class_names[i]: float(probs[i])
+            for i in range(len(self.class_names))
+        }
         stage = max(probs_dict, key=probs_dict.get)
+
+        print("SPOILAGE probs:", probs_dict)
+        print("SPOILAGE max_conf:", max_conf)
+        print("SPOILAGE stage:", stage)
+
+        if max_conf < self.min_confidence:
+            raise ValueError(
+                "Invalid image. Please capture a clear top-view lettuce image only."
+            )
+
         return stage, probs_dict

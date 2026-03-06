@@ -196,7 +196,11 @@ async def spoilage_predict(
     file_path.write_bytes(img_bytes)
     image_url = f"/uploads/{filename}"
 
-    stage, probs = clf.predict(img_bytes, temperature, humidity)
+    try:
+        stage, probs = clf.predict(img_bytes, temperature, humidity)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     raw_remaining = reg.predict(probs, temperature, humidity)
     status = make_status(stage, probs)
 
@@ -327,7 +331,11 @@ async def spoilage_stage_only(
     if not captured_at or captured_at.strip().lower() in ("string", "null", "none"):
         captured_at = datetime.now(timezone.utc).isoformat()
 
-    stage, probs = clf.predict(img_bytes, temperature, humidity)
+    try:
+        stage, probs = clf.predict(img_bytes, temperature, humidity)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     status = make_status(stage, probs)
 
     return StageOnlyResponse(
