@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
-def water_rule_checks(ph: float, temp_c: float, turb: float, ec: float, turb_d2: Optional[float]) -> Tuple[str, int, List[str], List[str]]:
+
+def water_rule_checks(
+    ph: float,
+    temp_c: float,
+    turb: float,
+    ec: float,
+    turb_d2: Optional[float],
+) -> Tuple[str, int, List[str], List[str]]:
     """
     Returns: rule_status, severity(0/1/2), reasons, actions
     Starter thresholds (tune for your farm).
@@ -77,7 +84,14 @@ def water_rule_checks(ph: float, temp_c: float, turb: float, ec: float, turb_d2:
     rule_status = ["OK", "WARNING", "CRITICAL"][sev]
     return rule_status, sev, reasons, sorted(actions)
 
-def algae_reasoning(turb: float, turb_d2: Optional[float], temp_c: float, ec: float, ph: float) -> Tuple[List[str], List[str]]:
+
+def algae_reasoning(
+    turb: float,
+    turb_d2: Optional[float],
+    temp_c: float,
+    ec: float,
+    ph: float,
+) -> Tuple[List[str], List[str]]:
     reasons: List[str] = []
     actions: set[str] = set()
 
@@ -106,7 +120,55 @@ def algae_reasoning(turb: float, turb_d2: Optional[float], temp_c: float, ec: fl
 
     return reasons, sorted(actions)
 
+
 def health_score_from_severity(sev: int, reasons: List[str]) -> int:
     # Stable demo-safe score
     score = 100 - (sev * 30) - (min(len(reasons), 6) * 5)
     return max(0, min(100, int(score)))
+
+
+# ============================
+# Main reason/action selector
+# ============================
+
+PRIORITY = [
+    "Sensor readings look unreliable",
+    "pH out of critical range",
+    "Temperature out of critical range",
+    "EC out of critical range",
+    "Turbidity very high",
+    "Turbidity rising quickly",
+    "Turbidity high",
+    "pH out of typical range",
+    "Temperature out of typical range",
+    "EC out of typical range",
+]
+
+MAIN_ACTION = {
+    "Sensor readings look unreliable": "Check sensor wiring/calibration and recheck readings.",
+    "pH out of critical range": "Correct pH gradually and recheck after 15 minutes.",
+    "Temperature out of critical range": "Stabilize water temperature and increase circulation.",
+    "EC out of critical range": "Correct EC (dilute or dose) and recheck after 15 minutes.",
+    "Turbidity very high": "Inspect filters, clean tank surfaces, and consider partial water change.",
+    "Turbidity rising quickly": "Inspect filters and reduce light exposure to the water surface.",
+    "Turbidity high": "Inspect filters and monitor turbidity trend.",
+    "pH out of typical range": "Monitor pH closely and recheck after 15 minutes.",
+    "Temperature out of typical range": "Monitor temperature and improve circulation if needed.",
+    "EC out of typical range": "Monitor EC and inspect dosing/pumps.",
+}
+
+
+def pick_main_reason_action(reasons: List[str], actions: List[str]) -> tuple[str, str]:
+    """
+    Pick ONE main reason + ONE main action for the UI.
+    - If reasons empty => safe default.
+    - Else pick by priority list.
+    """
+    if not reasons:
+        return "No issues detected", "Continue monitoring."
+
+    for r in PRIORITY:
+        if r in reasons:
+            return r, MAIN_ACTION.get(r, actions[0] if actions else "Inspect system and recheck readings.")
+
+    return reasons[0], (actions[0] if actions else "Inspect system and recheck readings.")
