@@ -19,8 +19,8 @@ def list_plants(
     zone_id: str | None = None,
     db: Session = Depends(get_db),
 ):
-    # latest scan/log per plant (PredictionLog)
-    q_logs = db.query(PredictionLog)
+    # latest scan/log per plant (PredictionLog) - exclude deleted
+    q_logs = db.query(PredictionLog).filter(PredictionLog.deleted_at.is_(None))
     if zone_id:
         q_logs = q_logs.filter(PredictionLog.zone_id == zone_id)
 
@@ -32,14 +32,25 @@ def list_plants(
         if key not in latest_by_plant:
             latest_by_plant[key] = r
 
-    # plants created by growth save (PlantMeta)
+    # Plants from PlantMeta (includes growth prediction-only plants)
     q_meta = db.query(PlantMeta)
     if zone_id:
         q_meta = q_meta.filter(PlantMeta.zone_id == zone_id)
     metas = q_meta.all()
     meta_keys = {(m.plant_id, m.zone_id or "") for m in metas}
 
-    all_keys = set(latest_by_plant.keys()) | meta_keys
+    # Get all plant_ids that already exist in logs or meta
+    existing_plant_ids = {plant_id for plant_id, _ in latest_by_plant.keys()} | {plant_id for plant_id, _ in meta_keys}
+
+    # ✅ Only get plants that ONLY have growth predictions (not in logs or meta)
+    q_growth_preds = db.query(GrowthPredictionLog.plant_id).distinct()
+    growth_pred_plant_ids = {row[0] for row in q_growth_preds.all()}
+    # Filter out plants that already exist in other sources
+    growth_only_plant_ids = growth_pred_plant_ids - existing_plant_ids
+    growth_pred_keys = {(pid, "") for pid in growth_only_plant_ids}
+
+    # Combine all sources (scans + meta + growth predictions that don't overlap)
+    all_keys = set(latest_by_plant.keys()) | meta_keys | growth_pred_keys
 
     out: list[PlantListItem] = []
 
@@ -62,7 +73,10 @@ def list_plants(
         else:
             first_log = (
                 db.query(PredictionLog)
-                .filter(PredictionLog.plant_id == plant_id)
+                .filter(
+                    PredictionLog.plant_id == plant_id,
+                    PredictionLog.deleted_at.is_(None)
+                )
                 .order_by(PredictionLog.ts.asc())
                 .first()
             )
@@ -119,23 +133,46 @@ def list_plants(
 
 @router.delete("/{plant_id}", response_model=PlantDeleteResponse)
 def delete_plant(plant_id: str, db: Session = Depends(get_db)):
+    """Soft/hard delete a plant - removes all related records including growth predictions"""
     plant_id = plant_id.strip()
+    now = datetime.now(timezone.utc)
 
+    # Check if plant exists in any table
     meta = db.query(PlantMeta).filter(PlantMeta.plant_id == plant_id).first()
-    logs = db.query(PredictionLog).filter(PredictionLog.plant_id == plant_id).all()
-    scans = db.query(PlantScan).filter(PlantScan.plant_id == plant_id).all()
+    logs = db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id,
+        PredictionLog.deleted_at.is_(None)
+    ).all()
+    scans = db.query(PlantScan).filter(
+        PlantScan.plant_id == plant_id,
+        PlantScan.deleted_at.is_(None)
+    ).all()
+    growth_preds = db.query(GrowthPredictionLog).filter(
+        GrowthPredictionLog.plant_id == plant_id
+    ).all()
 
-    if not meta and not logs and not scans:
+    if not meta and not logs and not scans and not growth_preds:
         raise HTTPException(status_code=404, detail=f"Plant {plant_id} not found")
 
+    # ✅ Soft delete: Set deleted_at timestamp for scan/prediction logs
+    # Mark all PredictionLog entries as deleted
+    db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id
+    ).update({"deleted_at": now, "updated_at": now})
+    
+    # Mark all PlantScan entries as deleted
+    db.query(PlantScan).filter(
+        PlantScan.plant_id == plant_id
+    ).update({"deleted_at": now})
+    
+    # ✅ Hard delete: Remove PlantMeta and GrowthPredictionLog entries
     if meta:
         db.delete(meta)
-    for s in scans:
-        db.delete(s)
-    for l in logs:
-        db.delete(l)
+    
+    # Delete all growth predictions for this plant
+    for growth_pred in growth_preds:
+        db.delete(growth_pred)
 
     db.commit()
 
-    now = datetime.now(timezone.utc)
     return PlantDeleteResponse(ok=True, plant_id=plant_id, deleted_at=now.isoformat())

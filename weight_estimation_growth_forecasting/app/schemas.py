@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any, Dict
 from datetime import datetime
 
@@ -11,7 +11,7 @@ class Sensors(BaseModel):
 class InferRequest(BaseModel):
     plant_id: str
     zone_id: str
-    dap: int
+    dap: int = Field(ge=0, description="Days after planting (must be >= 0)")
     sensors: Optional[Sensors] = None
     A_prev_cm2: Optional[float] = None
 
@@ -24,15 +24,20 @@ class InferResponse(BaseModel):
     D_proj_tmr_cm: float
     W_tmr_g: float
     mask_overlay_b64: Optional[str] = None
+    # Optional frontend-requested fields
+    image_url: Optional[str] = None
+    captured_at: Optional[str] = None
+    plant_id: Optional[str] = None
+    zone_id: Optional[str] = None
 
 class ForecastRequest(BaseModel):
     plant_id: str
     zone_id: str
-    dap: int
-    n_days: int
+    dap: int = Field(ge=0, description="Days after planting (must be >= 0)")
+    n_days: int = Field(ge=1, le=365, description="Number of days to forecast (1-365)")
     A_prev_cm2: Optional[float] = None 
-    A_t_cm2: float
-    D_t_cm: float
+    A_t_cm2: float = Field(gt=0, description="Current projected area (must be > 0)")
+    D_t_cm: float = Field(gt=0, description="Current diameter (must be > 0)")
     sensors: Optional[Any] = None
 
 class ForecastPoint(BaseModel):
@@ -111,8 +116,37 @@ class PlantHistoryItem(BaseModel):
     date_label: str
     actual_weight_g: Optional[float] = None
     predicted_weight_g: Optional[float] = None
+    age_days: Optional[int] = None
     delta_g: Optional[float] = None
-    status: str  # "On Track" etc.
+    status: str  # "Scanned" | "Predicted" | "On Track" etc.
+
+
+class ScanItem(BaseModel):
+    """Detailed scan record with all weight information"""
+    id: int
+    ts: datetime
+    created_at: datetime
+    weight_g: float
+    actual_weight_g: float
+    predicted_weight_g: Optional[float] = None
+    age_days: int
+    area_cm2: Optional[float] = None
+    diameter_cm: Optional[float] = None
+    status: str = "Scanned"
+    image_url: Optional[str] = None
+
+
+class GrowthPredictionItem(BaseModel):
+    """Growth prediction/forecast data"""
+    id: int
+    date: str
+    date_label: str
+    predicted_weight_g: float
+    predicted_area_cm2: float
+    predicted_diameter_cm: float
+    age_days: int
+    change_pct: float
+    created_at: datetime
 
 
 class PlantDetailsResponse(BaseModel):
@@ -125,7 +159,9 @@ class PlantDetailsResponse(BaseModel):
     growth_pct: float
     predicted_today_g: Optional[float] = None
     trajectory: Optional[dict] = None  # {labels:[], values:[]}
-    history: Optional[List[PlantHistoryItem]] = None
+    scans: Optional[List[ScanItem]] = None  # ✅ NEW: Detailed scan records
+    growth_predictions: Optional[List[GrowthPredictionItem]] = None  # ✅ NEW: Growth predictions
+    history: Optional[List[PlantHistoryItem]] = None  # Combined view for backward compatibility
 
 class WeightSaveRequest(BaseModel):
     plant_id: str

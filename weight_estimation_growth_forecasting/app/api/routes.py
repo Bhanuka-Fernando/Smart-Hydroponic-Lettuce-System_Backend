@@ -24,6 +24,8 @@ from app.schemas import (
     WeightSaveRequest,
     PlantDetailsResponse,
     PlantHistoryItem,
+    ScanItem,
+    GrowthPredictionItem,
     DashboardMetricsResponse,
     IoTSensorPayload,
     IoTIngestResponse,
@@ -82,13 +84,27 @@ async def infer_today(
     # 4) mask overlay for UI
     mask_png = make_mask_overlay_png(rgb_bytes, alpha=0.45)
     mask_b64 = base64.b64encode(mask_png).decode("utf-8")
+    
+    # 4.5) ✅ SAVE UPLOADED IMAGES TO DISK
+    now = datetime.utcnow()  # Single timestamp for all operations
+    timestamp_str = now.strftime("%Y%m%d_%H%M%S")
+    rgb_filename = f"{payload.plant_id}_{timestamp_str}_rgb.png"
+    depth_filename = f"{payload.plant_id}_{timestamp_str}_depth.png"
+    
+    rgb_path = os.path.join(UPLOAD_DIR, rgb_filename)
+    depth_path = os.path.join(UPLOAD_DIR, depth_filename)
+    
+    with open(rgb_path, "wb") as f:
+        f.write(rgb_bytes)
+    with open(depth_path, "wb") as f:
+        f.write(depth_bytes)
 
     # 5) save instant sensors (optional)
     if payload.sensors is not None:
         db.add(
             SensorReading(
                 zone_id=payload.zone_id,
-                ts=datetime.utcnow(),
+                ts=now,
                 airT=payload.sensors.airT,
                 RH=payload.sensors.RH,
                 EC=payload.sensors.EC,
@@ -98,7 +114,7 @@ async def infer_today(
         db.commit()
 
     # 6) 3-day mean sensors (model inputs)
-    means = get_3day_means(db, payload.zone_id, datetime.utcnow()) or {}
+    means = get_3day_means(db, payload.zone_id, now) or {}
 
     # 7) resolve A_prev from payload or DB (fallback = today A_proj)
     A_prev = payload.A_prev_cm2
@@ -127,6 +143,77 @@ async def infer_today(
     A_leaf_tmr = leaf_area_from_proj(A_tmr, D_tmr)
     W_tmr_g = predict_weight_g(A_leaf_tmr, D_tmr)
 
+    # 11) ✅ SAVE SCAN TO DATABASE (auto-persist every scan)
+    # Check for duplicate (same plant, zone, timestamp within 1 minute)
+    existing = (
+        db.query(PredictionLog)
+        .filter(
+            PredictionLog.plant_id == payload.plant_id,
+            PredictionLog.zone_id == payload.zone_id,
+            PredictionLog.ts >= now - timedelta(minutes=1),
+            PredictionLog.ts <= now + timedelta(minutes=1),
+        )
+        .first()
+    )
+    
+    if not existing:
+        # Save scan to PredictionLog
+        scan_log = PredictionLog(
+            plant_id=payload.plant_id,
+            zone_id=payload.zone_id,
+            ts=now,
+            A_proj_cm2=float(A_proj_cm2),
+            D_proj_cm=float(D_proj_cm),
+            A_leaf_est_cm2=float(A_des_cm2),
+            weight_est_g=float(W_today_g),
+            A_next_cm2=float(A_tmr),
+            D_next_cm=float(D_tmr),
+        )
+        db.add(scan_log)
+        
+        # Save PlantScan (image references)
+        plant_scan = PlantScan(
+            device_id="mobile-app",
+            plant_id=payload.plant_id,
+            zone_id=payload.zone_id,
+            ts=now,
+            rgb_path=rgb_path,
+            depth_path=depth_path,
+        )
+        db.add(plant_scan)
+        
+        # Create or update PlantMeta (for age and weight tracking)
+        meta = (
+            db.query(PlantMeta)
+            .filter(
+                PlantMeta.plant_id == payload.plant_id,
+                PlantMeta.zone_id == payload.zone_id,
+            )
+            .first()
+        )
+        
+        if not meta:
+            # Calculate planted_at from DAP (days after planting)
+            planted_at = now - timedelta(days=payload.dap)
+            meta = PlantMeta(
+                plant_id=payload.plant_id,
+                zone_id=payload.zone_id,
+                planted_at=planted_at,
+                updated_at=now,
+                start_weight_g=float(W_today_g),  # ✅ Set once on first scan
+                current_weight_g=float(W_today_g),
+            )
+            db.add(meta)
+        else:
+            # ✅ Only set start_weight_g if NULL (first scan after growth prediction)
+            if meta.start_weight_g is None:
+                meta.start_weight_g = float(W_today_g)
+            # ✅ Always update current_weight_g with latest scan
+            meta.current_weight_g = float(W_today_g)
+            meta.updated_at = now
+        
+        db.commit()
+
     return InferResponse(
         A_proj_cm2=A_proj_cm2,
         D_proj_cm=D_proj_cm,
@@ -136,6 +223,10 @@ async def infer_today(
         D_proj_tmr_cm=D_tmr,
         W_tmr_g=W_tmr_g,
         mask_overlay_b64=mask_b64,
+        image_url=rgb_path if 'rgb_path' in locals() else None,
+        captured_at=now.isoformat() if 'now' in locals() else None,
+        plant_id=payload.plant_id,
+        zone_id=payload.zone_id,
     )
 
 
@@ -474,16 +565,15 @@ def get_plant_details(
         age_days = 0
         planted_on = "Planted --"
 
-    # ---- logs (real scans) ----
-    q = db.query(PredictionLog).filter(PredictionLog.plant_id == plant_id)
+    # ---- logs (real scans) - GET ALL SCANS (not filtered by range) ----
+    q = db.query(PredictionLog).filter(
+        PredictionLog.plant_id == plant_id,
+        PredictionLog.deleted_at.is_(None)
+    )
     if zone_id:
         q = q.filter(PredictionLog.zone_id == zone_id)
 
-    if range == "7d":
-        q = q.filter(PredictionLog.ts >= (datetime.utcnow() - timedelta(days=7)))
-    elif range == "month":
-        q = q.filter(PredictionLog.ts >= (datetime.utcnow() - timedelta(days=30)))
-
+    # Get ALL scans for complete history
     logs = q.order_by(PredictionLog.ts.asc()).all()
 
     # ✅ if no scans yet, fallback to GrowthPredictionLog (prediction-only plants)
@@ -494,9 +584,38 @@ def get_plant_details(
         if not pred and not meta:
             raise HTTPException(status_code=404, detail="No records for this plant_id")
 
-        start_w = 0.0
-        current_w = float(getattr(pred, "predicted_weight_g", 0.0) or 0.0) if pred else 0.0
-        growth_pct = 0.0
+        # ✅ Use stored weights from PlantMeta if available, else use prediction
+        if meta and meta.start_weight_g is not None and meta.current_weight_g is not None:
+            start_w = float(meta.start_weight_g)
+            current_w = float(meta.current_weight_g)
+        else:
+            current_w = float(getattr(pred, "predicted_weight_g", 0.0) or 0.0) if pred else 0.0
+            start_w = current_w  # Start weight = current for prediction-only plants
+        
+        growth_pct = ((current_w - start_w) / start_w * 100.0) if start_w > 0 else 0.0
+
+        # ✅ GET ALL GROWTH PREDICTIONS for this plant
+        growth_predictions_list: list[GrowthPredictionItem] = []
+        all_growth_preds = (
+            db.query(GrowthPredictionLog)
+            .filter(GrowthPredictionLog.plant_id == plant_id)
+            .order_by(desc(GrowthPredictionLog.created_at))
+            .all()
+        )
+        for gp in all_growth_preds:
+            growth_predictions_list.append(
+                GrowthPredictionItem(
+                    id=gp.id,
+                    date=gp.created_at.date().isoformat(),
+                    date_label=gp.date_label,
+                    predicted_weight_g=float(gp.predicted_weight_g),
+                    predicted_area_cm2=float(gp.predicted_area_cm2),
+                    predicted_diameter_cm=float(gp.predicted_diameter_cm),
+                    age_days=age_days,
+                    change_pct=float(gp.change_pct),
+                    created_at=gp.created_at,
+                )
+            )
 
         history = []
         if pred:
@@ -506,6 +625,7 @@ def get_plant_details(
                     date_label=_date_label(datetime.utcnow()),
                     actual_weight_g=None,
                     predicted_weight_g=float(getattr(pred, "predicted_weight_g", 0.0) or 0.0),
+                    age_days=age_days,
                     delta_g=None,
                     status="Predicted",
                 )
@@ -521,6 +641,8 @@ def get_plant_details(
             growth_pct=round(growth_pct, 2),
             predicted_today_g=round(current_w, 2) if pred else None,
             trajectory={"labels": [], "values": []},
+            scans=[],  # ✅ NEW: Empty scans array for prediction-only plants
+            growth_predictions=growth_predictions_list,  # ✅ NEW: Growth predictions
             history=history,
         )
 
@@ -534,27 +656,97 @@ def get_plant_details(
         age_days = max(0, (datetime.utcnow().date() - planted_at.date()).days)
         planted_on = f"Planted {planted_at.strftime('%b %d')}"
 
-    start_w = float(oldest.weight_est_g or 0.0)
-    current_w = float(latest.weight_est_g or 0.0)
+    # ✅ Use stored weights from PlantMeta (set once on first scan, never changes)
+    # Fallback to calculated values for backward compatibility
+    if meta and meta.start_weight_g is not None:
+        start_w = float(meta.start_weight_g)
+    else:
+        start_w = float(oldest.weight_est_g or 0.0)
+    
+    if meta and meta.current_weight_g is not None:
+        current_w = float(meta.current_weight_g)
+    else:
+        current_w = float(latest.weight_est_g or 0.0)
+    
     growth_pct = ((current_w - start_w) / start_w * 100.0) if start_w > 0 else 0.0
 
     labels = [l.ts.strftime("%b %d") for l in logs]
     values = [float(l.weight_est_g or 0.0) for l in logs]
 
-    # history (latest first)
+    # ✅ BUILD SCANS ARRAY - Detailed scan records
+    scans_list: list[ScanItem] = []
+    for l in logs:
+        scan_age_days = max(0, (l.ts.date() - planted_at.date()).days) if planted_at else 0
+        weight_g = float(l.weight_est_g or 0.0)
+        
+        # Get associated plant_scan for image
+        plant_scan = (
+            db.query(PlantScan)
+            .filter(PlantScan.plant_id == plant_id, PlantScan.ts == l.ts)
+            .first()
+        )
+        
+        scans_list.append(
+            ScanItem(
+                id=l.id,
+                ts=l.ts,
+                created_at=l.ts,  # Use ts as created_at
+                weight_g=weight_g,
+                actual_weight_g=weight_g,
+                predicted_weight_g=weight_g,  # For scans, predicted = actual
+                age_days=scan_age_days,
+                area_cm2=float(l.A_leaf_est_cm2 or 0.0),
+                diameter_cm=float(l.D_proj_cm or 0.0),
+                status="Scanned",
+                image_url=plant_scan.rgb_path if plant_scan else None,
+            )
+        )
+
+    # ✅ GET GROWTH PREDICTIONS
+    growth_predictions_list: list[GrowthPredictionItem] = []
+    growth_preds = (
+        db.query(GrowthPredictionLog)
+        .filter(GrowthPredictionLog.plant_id == plant_id)
+        .order_by(desc(GrowthPredictionLog.created_at))
+        .all()
+    )
+    for gp in growth_preds:
+        # Calculate age_days for prediction date
+        pred_age_days = age_days  # Use current age as default
+        
+        growth_predictions_list.append(
+            GrowthPredictionItem(
+                id=gp.id,
+                date=gp.created_at.date().isoformat(),
+                date_label=gp.date_label,
+                predicted_weight_g=float(gp.predicted_weight_g),
+                predicted_area_cm2=float(gp.predicted_area_cm2),
+                predicted_diameter_cm=float(gp.predicted_diameter_cm),
+                age_days=pred_age_days,
+                change_pct=float(gp.change_pct),
+                created_at=gp.created_at,
+            )
+        )
+
+    # ✅ history - ALL scans with age_days and proper status (backward compatibility)
     history_forward: list[PlantHistoryItem] = []
     prev_actual = None
     for l in logs:
         actual = float(l.weight_est_g) if l.weight_est_g is not None else None
         delta = (actual - prev_actual) if (actual is not None and prev_actual is not None) else None
+        
+        # Calculate age_days for this scan
+        scan_age_days = max(0, (l.ts.date() - planted_at.date()).days) if planted_at else None
+        
         history_forward.append(
             PlantHistoryItem(
                 date=l.ts.date().isoformat(),
                 date_label=_date_label(l.ts),
                 actual_weight_g=round(actual, 2) if actual is not None else None,
-                predicted_weight_g=None,
+                predicted_weight_g=round(actual, 2) if actual is not None else None,  # For scans, predicted = actual
+                age_days=scan_age_days,
                 delta_g=round(delta, 2) if delta is not None else None,
-                status="On Track",
+                status="Scanned",
             )
         )
         if actual is not None:
@@ -570,6 +762,8 @@ def get_plant_details(
         growth_pct=round(growth_pct, 2),
         predicted_today_g=None,
         trajectory={"labels": labels, "values": [round(v, 2) for v in values]},
+        scans=scans_list,  # ✅ NEW: Detailed scan records
+        growth_predictions=growth_predictions_list,  # ✅ NEW: Growth predictions
         history=list(reversed(history_forward)),
     )
 
@@ -618,43 +812,3 @@ def get_activities_history(
         total_count=total_count,
         has_more=has_more,
     )
-
-@router.post("/growth/predict/save")
-def save_growth_prediction(payload: GrowthPredictSaveRequest, db: Session = Depends(get_db)):
-    # 1) Save growth prediction log
-    row = GrowthPredictionLog(
-        plant_id=payload.plant_id,
-        date_label=payload.date_label,
-        predicted_weight_g=float(payload.predicted_weight_g),
-        predicted_area_cm2=float(payload.predicted_area_cm2),
-        predicted_diameter_cm=float(payload.predicted_diameter_cm),
-        change_pct=float(payload.change_pct or 0.0),
-        series=payload.series.model_dump() if payload.series else None,
-        insight=payload.insight,
-    )
-    db.add(row)
-
-    # 2) ✅ Update PlantMeta.planted_at based on user entered age_days
-    # planted_at = today - age_days
-    planted_at = datetime.utcnow() - timedelta(days=int(payload.age_days))
-
-    meta = (
-        db.query(PlantMeta)
-        .filter(PlantMeta.plant_id == payload.plant_id, PlantMeta.zone_id == payload.zone_id)
-        .first()
-    )
-
-    if meta is None:
-        meta = PlantMeta(
-            plant_id=payload.plant_id,
-            zone_id=payload.zone_id,
-            planted_at=planted_at,
-            updated_at=datetime.utcnow(),
-        )
-        db.add(meta)
-    else:
-        meta.planted_at = planted_at
-        meta.updated_at = datetime.utcnow()
-
-    db.commit()
-    return {"ok": True}
