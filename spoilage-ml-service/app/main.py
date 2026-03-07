@@ -1,10 +1,11 @@
 # app/main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+
 from app.api.routes import router
 from app.db import create_db_and_tables
-from fastapi.staticfiles import StaticFiles
-import os
 
 # ✅ ensure table model is registered
 import app.models  # noqa
@@ -23,13 +24,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# uploads (existing)
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# ✅ absolute base paths (no dependence on terminal working directory)
+# app/main.py -> app/ -> spoilage-ml-service/
+APP_DIR = Path(__file__).resolve().parent          # .../spoilage-ml-service/app
+PROJECT_ROOT = APP_DIR.parent                      # .../spoilage-ml-service
 
-# ✅ NEW: serve simulation images from backend folder
-# put images inside: spoilage-ml-service/sim_images/
-os.makedirs("sim_images", exist_ok=True)
-app.mount("/sim-images", StaticFiles(directory="sim_images"), name="sim-images")
+UPLOADS_DIR = PROJECT_ROOT / "uploads"
+SIM_IMAGES_DIR = PROJECT_ROOT / "sim_images"
+
+UPLOADS_DIR.mkdir(exist_ok=True)
+SIM_IMAGES_DIR.mkdir(exist_ok=True)
+
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+app.mount("/sim-images", StaticFiles(directory=str(SIM_IMAGES_DIR)), name="sim-images")
 
 app.include_router(router)
