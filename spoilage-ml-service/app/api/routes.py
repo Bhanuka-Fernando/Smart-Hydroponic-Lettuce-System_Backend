@@ -32,6 +32,44 @@ reg = RemainingDaysRegressor(settings.REG_MODEL_PATH, settings.REG_META_PATH)
 sim = ProbReplaySimulator(settings.SIM_PROBS_CSV)
 
 STAGE_ORDER = ["fresh", "slightly_aged", "near_spoilage", "spoiled"]
+STAGE_RANK = {name: i for i, name in enumerate(STAGE_ORDER)}
+
+
+def _normalize_stage(stage: str | None) -> str | None:
+    if not stage:
+        return None
+    s = stage.strip().lower()
+    return s if s in STAGE_RANK else None
+
+
+def _prevent_stage_regression(previous_stage: str | None, new_stage: str) -> str:
+    prev = _normalize_stage(previous_stage)
+    new = _normalize_stage(new_stage)
+
+    if not new:
+        return new_stage
+
+    if not prev:
+        return new
+
+    if STAGE_RANK[new] < STAGE_RANK[prev]:
+        return prev
+
+    return new
+
+
+def _cap_remaining_by_stage(stage: str, remaining: float) -> float:
+    s = _normalize_stage(stage)
+    value = max(0.0, float(remaining))
+
+    if s == "spoiled":
+        return 0.0
+    if s == "near_spoilage":
+        return min(value, 2.0)
+    if s == "slightly_aged":
+        return min(value, 5.0)
+
+    return value
 
 
 def _advance_stage_by_days(current: str | None, days: int) -> str | None:
@@ -197,12 +235,14 @@ async def spoilage_predict(
     image_url = f"/uploads/{filename}"
 
     try:
-        stage, probs = clf.predict(img_bytes, temperature, humidity)
+        raw_stage, probs = clf.predict(img_bytes, temperature, humidity)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
+    accepted_stage = raw_stage
     raw_remaining = reg.predict(probs, temperature, humidity)
-    status = make_status(stage, probs)
+    final_remaining = _cap_remaining_by_stage(accepted_stage, raw_remaining)
+    status = make_status(accepted_stage, probs)
 
     try:
         latest_stmt = (
@@ -214,7 +254,11 @@ async def spoilage_predict(
         latest = session.exec(latest_stmt).first()
 
         previous_stage = latest.stage if latest else None
+        accepted_stage = _prevent_stage_regression(previous_stage, raw_stage)
+
         final_remaining = _final_remaining_from_history(raw_remaining, latest, dt)
+        final_remaining = _cap_remaining_by_stage(accepted_stage, final_remaining)
+        status = make_status(accepted_stage, probs)
 
         saved_row = None
 
@@ -229,7 +273,7 @@ async def spoilage_predict(
                 latest.captured_at = dt
                 latest.temperature = float(temperature)
                 latest.humidity = float(humidity)
-                latest.stage = stage
+                latest.stage = accepted_stage
                 latest.status = status
                 latest.remaining_days = float(final_remaining)
                 latest.p_fresh = float(probs["fresh"])
@@ -249,7 +293,7 @@ async def spoilage_predict(
                     captured_at=dt,
                     temperature=float(temperature),
                     humidity=float(humidity),
-                    stage=stage,
+                    stage=accepted_stage,
                     status=status,
                     remaining_days=float(final_remaining),
                     p_fresh=float(probs["fresh"]),
@@ -269,7 +313,7 @@ async def spoilage_predict(
                 captured_at=dt,
                 temperature=float(temperature),
                 humidity=float(humidity),
-                stage=stage,
+                stage=accepted_stage,
                 status=status,
                 remaining_days=float(final_remaining),
                 p_fresh=float(probs["fresh"]),
@@ -292,18 +336,19 @@ async def spoilage_predict(
                 plant_id=plant_id,
                 prediction_id=saved_row.id,
                 previous_stage=previous_stage,
-                current_stage=stage,
+                current_stage=accepted_stage,
             )
 
     except Exception as e:
         session.rollback()
         print("DB insert/update failed:", e)
-        final_remaining = max(0.0, float(raw_remaining))
+        final_remaining = _cap_remaining_by_stage(accepted_stage, final_remaining)
+        status = make_status(accepted_stage, probs)
 
     return SpoilagePredictResponse(
         plant_id=plant_id,
         captured_at=captured_at,
-        stage=stage,
+        stage=accepted_stage,
         stage_probs=StageProbs(**probs),
         remaining_days=float(final_remaining),
         status=status,
@@ -313,6 +358,7 @@ async def spoilage_predict(
 @router.post("/spoilage/stage-only", response_model=StageOnlyResponse)
 async def spoilage_stage_only(
     user=Depends(require_user),
+    session: Session = Depends(get_session),
     image: UploadFile = File(...),
     temperature: float = Form(...),
     humidity: float = Form(...),
@@ -328,20 +374,30 @@ async def spoilage_stage_only(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    if not captured_at or captured_at.strip().lower() in ("string", "null", "none"):
-        captured_at = datetime.now(timezone.utc).isoformat()
+    dt = _parse_dt_or_now(captured_at)
+    captured_at = dt.isoformat()
 
     try:
-        stage, probs = clf.predict(img_bytes, temperature, humidity)
+        raw_stage, probs = clf.predict(img_bytes, temperature, humidity)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    status = make_status(stage, probs)
+    latest_stmt = (
+        select(SpoilagePrediction)
+        .where(SpoilagePrediction.plant_id == plant_id)
+        .order_by(SpoilagePrediction.captured_at.desc())
+        .limit(1)
+    )
+    latest = session.exec(latest_stmt).first()
+
+    previous_stage = latest.stage if latest else None
+    accepted_stage = _prevent_stage_regression(previous_stage, raw_stage)
+    status = make_status(accepted_stage, probs)
 
     return StageOnlyResponse(
         plant_id=plant_id,
         captured_at=captured_at,
-        stage=stage,
+        stage=accepted_stage,
         stage_probs=StageProbs(**probs),
         status=status,
     )
