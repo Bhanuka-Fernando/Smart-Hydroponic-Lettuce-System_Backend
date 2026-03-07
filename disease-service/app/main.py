@@ -3,9 +3,10 @@ from dotenv import load_dotenv
 from datetime import datetime
 from pathlib import Path
 from fastapi.responses import Response
-from app.services.infer import predict_annotated_image_bytes
 
-from app.db import init_db
+from app.core.db import engine
+from app.core.db_models import Base
+
 from app.schemas import LogCreate
 from app.storage import (
     insert_log,
@@ -13,7 +14,7 @@ from app.storage import (
     get_latest_for_plant,
     get_critical_recent,
 )
-from app.services.infer import predict_from_image_bytes
+from app.services.infer import predict_from_image_bytes, predict_annotated_image_bytes
 
 load_dotenv()
 
@@ -38,26 +39,23 @@ def _now_iso() -> str:
 
 @app.on_event("startup")
 def startup():
-    init_db()
+    Base.metadata.create_all(bind=engine)
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-# 1) Analyze image (auto plant_id + auto captured_at)
 @app.post("/predict")
 async def predict(image: UploadFile = File(...)):
     img_bytes = await image.read()
     result = predict_from_image_bytes(img_bytes)
 
-    # Force server-generated ID + timestamp
     result["plant_id"] = _next_plant_id()
     result["captured_at"] = _now_iso()
     result["image_name"] = image.filename
 
     return result
 
-# 2) Save to Daily Log (server also ensures id + time exist)
 @app.post("/logs")
 def save_log(payload: LogCreate):
     if not payload.plant_id:
@@ -73,17 +71,14 @@ def save_log(payload: LogCreate):
         "captured_at": payload.captured_at,
     }
 
-# 3) Dashboard recent critical only (ACT NOW)
 @app.get("/dashboard/recent")
 def dashboard_recent(limit: int = 5):
     return {"items": get_critical_recent(limit=limit)}
 
-# 4) Plant history (newest first)
 @app.get("/plants/{plant_id}/logs")
 def plant_logs(plant_id: str, limit: int = 50):
     return {"plant_id": plant_id, "items": get_logs_for_plant(plant_id, limit=limit)}
 
-# 5) Plant latest record
 @app.get("/plants/{plant_id}/latest")
 def plant_latest(plant_id: str):
     item = get_latest_for_plant(plant_id)
