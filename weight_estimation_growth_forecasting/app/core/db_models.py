@@ -95,3 +95,13 @@ class GrowthPredictionLog(Base):
     series = Column(JSON, nullable=True)
     insight = Column(JSON, nullable=True)
 
+class PlantMeta(Base):
+    __tablename__ = "plant_meta"
+
+    plant_id = Column(String, primary_key=True)
+    zone_id = Column(String, primary_key=True)
+    planted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    start_weight_g = Column(Float, nullable=True)  # Set ONCE on first scan, never updated
+    current_weight_g = Column(Float, nullable=True)  # Updated on every scan
+
