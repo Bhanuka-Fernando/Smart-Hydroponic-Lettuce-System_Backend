@@ -23,10 +23,6 @@ class SpoilageClassifier:
 
         self.model = load_keras_model(model_path)
 
-        # keep these relaxed
-        self.min_confidence = 0.45
-        self.min_green_ratio = 0.04
-
     def _read_image(self, image_bytes: bytes) -> Image.Image:
         try:
             img = Image.open(BytesIO(image_bytes))
@@ -48,36 +44,95 @@ class SpoilageClassifier:
         s = (s - self.sensor_mean) / (self.sensor_std + 1e-9)
         return s
 
-    def _estimate_green_ratio(self, img: Image.Image) -> float:
-        arr = np.array(img.resize((256, 256)), dtype=np.uint8)
+    def _green_mask(self, arr: np.ndarray) -> np.ndarray:
         r = arr[:, :, 0].astype(np.float32)
         g = arr[:, :, 1].astype(np.float32)
         b = arr[:, :, 2].astype(np.float32)
 
-        green_mask = (
-            (g > 55) &
-            (g > r * 1.03) &
-            (g > b * 1.02)
+        mask = (
+            (g > 50) &
+            (g > r * 1.10) &
+            (g > b * 1.08) &
+            ((g - r) > 10) &
+            ((g - b) > 8)
         )
+        return mask
 
-        green_ratio = float(np.mean(green_mask))
-        return green_ratio
+    def _brown_mask(self, arr: np.ndarray) -> np.ndarray:
+        r = arr[:, :, 0].astype(np.float32)
+        g = arr[:, :, 1].astype(np.float32)
+        b = arr[:, :, 2].astype(np.float32)
 
-    def _validate_image_content(self, img: Image.Image):
-        green_ratio = self._estimate_green_ratio(img)
+        mask = (
+            (r > 40) &
+            (g > 20) &
+            (r >= g) &
+            (g > b * 0.9) &
+            ((r - b) > 8)
+        )
+        return mask
 
-        print("VALIDATION green_ratio:", green_ratio)
+    def _leafy_stats(self, img: Image.Image) -> dict:
+        arr = np.array(img.resize((256, 256)), dtype=np.uint8)
 
-        if green_ratio < self.min_green_ratio:
+        green_mask = self._green_mask(arr)
+        brown_mask = self._brown_mask(arr)
+
+        global_green_ratio = float(np.mean(green_mask))
+        global_green_pixels = int(np.sum(green_mask))
+
+        global_brown_ratio = float(np.mean(brown_mask))
+        global_brown_pixels = int(np.sum(brown_mask))
+
+        h, w = arr.shape[:2]
+        y1, y2 = int(h * 0.2), int(h * 0.8)
+        x1, x2 = int(w * 0.2), int(w * 0.8)
+        center = arr[y1:y2, x1:x2]
+
+        center_green_mask = self._green_mask(center)
+        center_brown_mask = self._brown_mask(center)
+
+        center_green_ratio = float(np.mean(center_green_mask))
+        center_green_pixels = int(np.sum(center_green_mask))
+
+        center_brown_ratio = float(np.mean(center_brown_mask))
+        center_brown_pixels = int(np.sum(center_brown_mask))
+
+        brightness = arr.mean(axis=2)
+        dark_ratio = float(np.mean(brightness < 25))
+        bright_ratio = float(np.mean(brightness > 245))
+
+        return {
+            "global_green_ratio": global_green_ratio,
+            "center_green_ratio": center_green_ratio,
+            "global_green_pixels": global_green_pixels,
+            "center_green_pixels": center_green_pixels,
+            "global_brown_ratio": global_brown_ratio,
+            "center_brown_ratio": center_brown_ratio,
+            "global_brown_pixels": global_brown_pixels,
+            "center_brown_pixels": center_brown_pixels,
+            "dark_ratio": dark_ratio,
+            "bright_ratio": bright_ratio,
+        }
+
+    def _validate_basic_image(self, stats: dict):
+        if stats["dark_ratio"] > 0.75:
             raise ValueError(
-                "Invalid image. Please capture a clear top-view lettuce image only."
+                "Image is too dark. Please capture a clearer top-view lettuce image."
+            )
+
+        if stats["bright_ratio"] > 0.75:
+            raise ValueError(
+                "Image is too bright. Please capture a clearer top-view lettuce image."
             )
 
     def predict(self, image_bytes: bytes, temperature: float, humidity: float) -> tuple[str, dict]:
         img = self._read_image(image_bytes)
 
-        # only reject obvious non-lettuce images
-        self._validate_image_content(img)
+        stats = self._leafy_stats(img)
+        self._validate_basic_image(stats)
+
+        print("VALIDATION stats:", stats)
 
         x_img = self._preprocess_image(img)
         x_sens = self._preprocess_sensor(temperature, humidity)
@@ -96,19 +151,62 @@ class SpoilageClassifier:
             probs = np.clip(probs, 0.0, 1.0)
             probs = probs / (np.sum(probs) + 1e-9)
 
-        max_conf = float(np.max(probs))
         probs_dict = {
             self.class_names[i]: float(probs[i])
             for i in range(len(self.class_names))
         }
-        stage = max(probs_dict, key=probs_dict.get)
+
+        sorted_idx = np.argsort(probs)[::-1]
+        top1_idx = int(sorted_idx[0])
+        top2_idx = int(sorted_idx[1]) if len(sorted_idx) > 1 else int(sorted_idx[0])
+
+        top1_conf = float(probs[top1_idx])
+        top2_conf = float(probs[top2_idx])
+        margin = top1_conf - top2_conf
+        stage = self.class_names[top1_idx]
+
+        global_green = stats["global_green_ratio"]
+        center_green = stats["center_green_ratio"]
+        global_green_pixels = stats["global_green_pixels"]
+        center_green_pixels = stats["center_green_pixels"]
+
+        global_brown = stats["global_brown_ratio"]
+        center_brown = stats["center_brown_ratio"]
+        global_brown_pixels = stats["global_brown_pixels"]
+        center_brown_pixels = stats["center_brown_pixels"]
+
+        very_weak_green = (
+            global_green < 0.015 and
+            center_green < 0.03 and
+            global_green_pixels < 700 and
+            center_green_pixels < 180
+        )
+
+        has_brown_support = (
+            global_brown > 0.04 or
+            center_brown > 0.05 or
+            global_brown_pixels > 1200 or
+            center_brown_pixels > 300
+        )
+
+        suspicious_non_lettuce = (
+            very_weak_green and
+            not has_brown_support and
+            top1_conf < 0.9999
+        )
 
         print("SPOILAGE probs:", probs_dict)
-        print("SPOILAGE max_conf:", max_conf)
+        print("SPOILAGE top1_conf:", top1_conf)
+        print("SPOILAGE top2_conf:", top2_conf)
+        print("SPOILAGE margin:", margin)
         print("SPOILAGE stage:", stage)
+        print("SPOILAGE very_weak_green:", very_weak_green)
+        print("SPOILAGE has_brown_support:", has_brown_support)
+        print("SPOILAGE suspicious_non_lettuce:", suspicious_non_lettuce)
 
-        # do not reject normal lettuce images too aggressively
-        if max_conf < self.min_confidence:
-            print("Low confidence, but allowing prediction:", max_conf)
+        if suspicious_non_lettuce:
+            raise ValueError(
+                "Object not recognized as lettuce. Please capture a clear top-view image of one lettuce plant only."
+            )
 
         return stage, probs_dict
