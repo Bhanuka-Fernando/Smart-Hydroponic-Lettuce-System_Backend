@@ -119,6 +119,32 @@ def get_critical_recent(limit: int = 5) -> List[RecentActivityItem]:
     finally:
         db.close()
 
+def get_all_logs(limit: int = 50, offset: int = 0):
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(ScanLog)
+            .order_by(ScanLog.id.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+        return [
+            LogItem(
+                id=r.id,
+                plant_id=r.plant_id,
+                captured_at=r.captured_at,
+                health_score=r.health_score,
+                status=r.status,
+                main_issue=r.main_issue,
+                image_name=r.image_name,
+            )
+            for r in rows
+        ]
+    finally:
+        db.close()
+
 def get_log_by_id(log_id: int) -> Optional[dict]:
     db = SessionLocal()
     try:
@@ -144,3 +170,29 @@ def get_log_by_id(log_id: int) -> Optional[dict]:
         }
     finally:
         db.close()
+
+    def get_all_logs(limit: int = 50, offset: int = 0):
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(ScanLog)
+                .order_by(ScanLog.id.desc())
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+
+            return [
+                LogItem(
+                    id=r.id,
+                    plant_id=r.plant_id,
+                    captured_at=r.captured_at,
+                    health_score=r.health_score,
+                    status=r.status,
+                    main_issue=r.main_issue,
+                    image_name=r.image_name,
+                )
+                for r in rows
+            ]
+        finally:
+            db.close()

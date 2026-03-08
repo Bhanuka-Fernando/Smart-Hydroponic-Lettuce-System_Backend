@@ -15,6 +15,7 @@ from app.storage import (
     get_latest_for_plant,
     get_critical_recent,
     get_log_by_id,
+    get_all_logs,
 )
 from app.services.infer import predict_from_image_bytes, predict_annotated_image_bytes
 
@@ -104,6 +105,13 @@ def save_log(payload: LogCreate):
         "captured_at": payload.captured_at,
     }
 
+@app.get("/logs")
+def all_logs(limit: int = 50, offset: int = 0):
+    return {
+        "items": get_all_logs(limit=limit, offset=offset),
+        "limit": limit,
+        "offset": offset,
+    }
 
 @app.get("/dashboard/recent")
 def dashboard_recent(limit: int = 5):
