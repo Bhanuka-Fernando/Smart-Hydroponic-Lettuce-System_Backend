@@ -58,20 +58,45 @@ class SpoilageClassifier:
         )
         return mask
 
+    def _brown_mask(self, arr: np.ndarray) -> np.ndarray:
+        r = arr[:, :, 0].astype(np.float32)
+        g = arr[:, :, 1].astype(np.float32)
+        b = arr[:, :, 2].astype(np.float32)
+
+        mask = (
+            (r > 40) &
+            (g > 20) &
+            (r >= g) &
+            (g > b * 0.9) &
+            ((r - b) > 8)
+        )
+        return mask
+
     def _leafy_stats(self, img: Image.Image) -> dict:
         arr = np.array(img.resize((256, 256)), dtype=np.uint8)
 
         green_mask = self._green_mask(arr)
+        brown_mask = self._brown_mask(arr)
+
         global_green_ratio = float(np.mean(green_mask))
         global_green_pixels = int(np.sum(green_mask))
+
+        global_brown_ratio = float(np.mean(brown_mask))
+        global_brown_pixels = int(np.sum(brown_mask))
 
         h, w = arr.shape[:2]
         y1, y2 = int(h * 0.2), int(h * 0.8)
         x1, x2 = int(w * 0.2), int(w * 0.8)
         center = arr[y1:y2, x1:x2]
-        center_mask = self._green_mask(center)
-        center_green_ratio = float(np.mean(center_mask))
-        center_green_pixels = int(np.sum(center_mask))
+
+        center_green_mask = self._green_mask(center)
+        center_brown_mask = self._brown_mask(center)
+
+        center_green_ratio = float(np.mean(center_green_mask))
+        center_green_pixels = int(np.sum(center_green_mask))
+
+        center_brown_ratio = float(np.mean(center_brown_mask))
+        center_brown_pixels = int(np.sum(center_brown_mask))
 
         brightness = arr.mean(axis=2)
         dark_ratio = float(np.mean(brightness < 25))
@@ -82,6 +107,10 @@ class SpoilageClassifier:
             "center_green_ratio": center_green_ratio,
             "global_green_pixels": global_green_pixels,
             "center_green_pixels": center_green_pixels,
+            "global_brown_ratio": global_brown_ratio,
+            "center_brown_ratio": center_brown_ratio,
+            "global_brown_pixels": global_brown_pixels,
+            "center_brown_pixels": center_brown_pixels,
             "dark_ratio": dark_ratio,
             "bright_ratio": bright_ratio,
         }
@@ -138,48 +167,46 @@ class SpoilageClassifier:
 
         global_green = stats["global_green_ratio"]
         center_green = stats["center_green_ratio"]
-        global_pixels = stats["global_green_pixels"]
-        center_pixels = stats["center_green_pixels"]
+        global_green_pixels = stats["global_green_pixels"]
+        center_green_pixels = stats["center_green_pixels"]
 
-        weak_visual_evidence = (
-            global_green < 0.05 or
-            center_green < 0.08 or
-            global_pixels < 1800 or
-            center_pixels < 500
+        global_brown = stats["global_brown_ratio"]
+        center_brown = stats["center_brown_ratio"]
+        global_brown_pixels = stats["global_brown_pixels"]
+        center_brown_pixels = stats["center_brown_pixels"]
+
+        very_weak_green = (
+            global_green < 0.015 and
+            center_green < 0.03 and
+            global_green_pixels < 700 and
+            center_green_pixels < 180
         )
 
-        very_weak_visual_evidence = (
-            global_green < 0.03 or
-            center_green < 0.05 or
-            global_pixels < 1000 or
-            center_pixels < 250
+        has_brown_support = (
+            global_brown > 0.04 or
+            center_brown > 0.05 or
+            global_brown_pixels > 1200 or
+            center_brown_pixels > 300
         )
 
-        low_confidence_prediction = (
-            top1_conf < 0.72 or
-            margin < 0.20
+        suspicious_non_lettuce = (
+            very_weak_green and
+            not has_brown_support and
+            top1_conf < 0.9999
         )
-
-        suspicious_non_lettuce = very_weak_visual_evidence
-        uncertain_lettuce = weak_visual_evidence or low_confidence_prediction
 
         print("SPOILAGE probs:", probs_dict)
         print("SPOILAGE top1_conf:", top1_conf)
         print("SPOILAGE top2_conf:", top2_conf)
         print("SPOILAGE margin:", margin)
         print("SPOILAGE stage:", stage)
-        print("SPOILAGE weak_visual_evidence:", weak_visual_evidence)
-        print("SPOILAGE very_weak_visual_evidence:", very_weak_visual_evidence)
-        print("SPOILAGE low_confidence_prediction:", low_confidence_prediction)
+        print("SPOILAGE very_weak_green:", very_weak_green)
+        print("SPOILAGE has_brown_support:", has_brown_support)
+        print("SPOILAGE suspicious_non_lettuce:", suspicious_non_lettuce)
 
         if suspicious_non_lettuce:
             raise ValueError(
                 "Object not recognized as lettuce. Please capture a clear top-view image of one lettuce plant only."
-            )
-
-        if uncertain_lettuce:
-            raise ValueError(
-                "Prediction is uncertain. Please recapture a clear top-view image of the lettuce."
             )
 
         return stage, probs_dict
