@@ -28,7 +28,6 @@ router = APIRouter()
 
 clf = SpoilageClassifier(settings.STAGE_MODEL_PATH, settings.STAGE_META_PATH)
 reg = RemainingDaysRegressor(settings.REG_MODEL_PATH, settings.REG_META_PATH)
-
 sim = ProbReplaySimulator(settings.SIM_PROBS_CSV)
 
 STAGE_ORDER = ["fresh", "slightly_aged", "near_spoilage", "spoiled"]
@@ -42,20 +41,17 @@ def _normalize_stage(stage: str | None) -> str | None:
     return s if s in STAGE_RANK else None
 
 
-def _prevent_stage_regression(previous_stage: str | None, new_stage: str) -> str:
-    prev = _normalize_stage(previous_stage)
-    new = _normalize_stage(new_stage)
+def _parse_dt_or_now(value: str | None) -> datetime:
+    if not value or value.strip().lower() in ("string", "null", "none"):
+        return datetime.now(timezone.utc)
 
-    if not new:
-        return new_stage
-
-    if not prev:
-        return new
-
-    if STAGE_RANK[new] < STAGE_RANK[prev]:
-        return prev
-
-    return new
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 def _cap_remaining_by_stage(stage: str, remaining: float) -> float:
@@ -70,55 +66,6 @@ def _cap_remaining_by_stage(stage: str, remaining: float) -> float:
         return min(value, 5.0)
 
     return value
-
-
-def _advance_stage_by_days(current: str | None, days: int) -> str | None:
-    if not current:
-        return None
-    cur = current.strip().lower()
-    if cur not in STAGE_ORDER:
-        return None
-    i = STAGE_ORDER.index(cur)
-    j = min(i + max(0, days), len(STAGE_ORDER) - 1)
-    return STAGE_ORDER[j]
-
-
-def _parse_dt_or_now(value: str | None) -> datetime:
-    if not value or value.strip().lower() in ("string", "null", "none"):
-        return datetime.now(timezone.utc)
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except Exception:
-        return datetime.now(timezone.utc)
-
-
-def _elapsed_days_by_calendar(prev_dt: datetime, new_dt: datetime) -> int:
-    p = prev_dt.astimezone(timezone.utc).date()
-    n = new_dt.astimezone(timezone.utc).date()
-    return max(0, (n - p).days)
-
-
-def _final_remaining_from_history(
-    raw_remaining: float,
-    latest: SpoilagePrediction | None,
-    new_dt: datetime,
-) -> float:
-    raw_remaining = max(0.0, float(raw_remaining))
-
-    if not latest:
-        return raw_remaining
-
-    prev_dt = latest.captured_at
-    if prev_dt.tzinfo is None:
-        prev_dt = prev_dt.replace(tzinfo=timezone.utc)
-
-    elapsed_days = _elapsed_days_by_calendar(prev_dt, new_dt)
-    adjusted_prev = max(0.0, float(latest.remaining_days) - float(elapsed_days))
-
-    return min(raw_remaining, adjusted_prev)
 
 
 def _alert_payload_for_stage(stage: str, plant_id: str) -> dict | None:
@@ -137,6 +84,100 @@ def _alert_payload_for_stage(stage: str, plant_id: str) -> dict | None:
         }
 
     return None
+
+
+def predict_current_state(
+    img_bytes: bytes,
+    temperature: float,
+    humidity: float,
+) -> dict:
+    raw_stage, probs = clf.predict(img_bytes, temperature, humidity)
+    raw_remaining = reg.predict(probs, temperature, humidity)
+
+    final_stage = raw_stage
+    final_remaining = _cap_remaining_by_stage(final_stage, raw_remaining)
+    final_status = make_status(final_stage, probs)
+
+    return {
+        "final_stage": final_stage,
+        "probs": probs,
+        "final_remaining": float(final_remaining),
+        "final_status": final_status,
+    }
+
+
+def load_latest_prediction(
+    session: Session,
+    plant_id: str,
+) -> SpoilagePrediction | None:
+    stmt = (
+        select(SpoilagePrediction)
+        .where(SpoilagePrediction.plant_id == plant_id)
+        .order_by(SpoilagePrediction.captured_at.desc())
+        .limit(1)
+    )
+    return session.exec(stmt).first()
+
+
+def save_prediction_row(
+    session: Session,
+    latest: SpoilagePrediction | None,
+    plant_id: str,
+    captured_dt: datetime,
+    temperature: float,
+    humidity: float,
+    final_stage: str,
+    final_status: str,
+    final_remaining: float,
+    probs: dict,
+    image_url: str,
+    sim_source_image: str | None,
+) -> SpoilagePrediction:
+    if latest:
+        latest_dt = latest.captured_at
+        if latest_dt.tzinfo is None:
+            latest_dt = latest_dt.replace(tzinfo=timezone.utc)
+
+        diff_sec = abs((captured_dt - latest_dt).total_seconds())
+
+        if diff_sec <= 60:
+            latest.captured_at = captured_dt
+            latest.temperature = float(temperature)
+            latest.humidity = float(humidity)
+            latest.stage = final_stage
+            latest.status = final_status
+            latest.remaining_days = float(final_remaining)
+            latest.p_fresh = float(probs["fresh"])
+            latest.p_slightly_aged = float(probs["slightly_aged"])
+            latest.p_near_spoilage = float(probs["near_spoilage"])
+            latest.p_spoiled = float(probs["spoiled"])
+            latest.image_url = image_url
+            latest.sim_source_image = sim_source_image
+
+            session.add(latest)
+            session.commit()
+            session.refresh(latest)
+            return latest
+
+    row = SpoilagePrediction(
+        plant_id=plant_id,
+        captured_at=captured_dt,
+        temperature=float(temperature),
+        humidity=float(humidity),
+        stage=final_stage,
+        status=final_status,
+        remaining_days=float(final_remaining),
+        p_fresh=float(probs["fresh"]),
+        p_slightly_aged=float(probs["slightly_aged"]),
+        p_near_spoilage=float(probs["near_spoilage"]),
+        p_spoiled=float(probs["spoiled"]),
+        image_url=image_url,
+        sim_source_image=sim_source_image,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
 
 
 def _create_alert_if_needed(
@@ -225,8 +266,7 @@ async def spoilage_predict(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    dt = _parse_dt_or_now(captured_at)
-    captured_at = dt.isoformat()
+    captured_dt = _parse_dt_or_now(captured_at)
 
     Path("uploads").mkdir(exist_ok=True)
     filename = f"{plant_id}_{uuid.uuid4().hex}.jpg"
@@ -235,123 +275,56 @@ async def spoilage_predict(
     image_url = f"/uploads/{filename}"
 
     try:
-        raw_stage, probs = clf.predict(img_bytes, temperature, humidity)
+        prediction = predict_current_state(img_bytes, temperature, humidity)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    accepted_stage = raw_stage
-    raw_remaining = reg.predict(probs, temperature, humidity)
-    final_remaining = _cap_remaining_by_stage(accepted_stage, raw_remaining)
-    status = make_status(accepted_stage, probs)
+    final_stage = prediction["final_stage"]
+    probs = prediction["probs"]
+    final_remaining = prediction["final_remaining"]
+    final_status = prediction["final_status"]
+
+    latest = load_latest_prediction(session, plant_id)
+    previous_stage = latest.stage if latest else None
 
     try:
-        latest_stmt = (
-            select(SpoilagePrediction)
-            .where(SpoilagePrediction.plant_id == plant_id)
-            .order_by(SpoilagePrediction.captured_at.desc())
-            .limit(1)
+        saved_row = save_prediction_row(
+            session=session,
+            latest=latest,
+            plant_id=plant_id,
+            captured_dt=captured_dt,
+            temperature=temperature,
+            humidity=humidity,
+            final_stage=final_stage,
+            final_status=final_status,
+            final_remaining=final_remaining,
+            probs=probs,
+            image_url=image_url,
+            sim_source_image=sim_source_image,
         )
-        latest = session.exec(latest_stmt).first()
 
-        previous_stage = latest.stage if latest else None
-        accepted_stage = _prevent_stage_regression(previous_stage, raw_stage)
+        _create_alert_if_needed(
+            session=session,
+            plant_id=plant_id,
+            prediction_id=saved_row.id,
+            previous_stage=previous_stage,
+            current_stage=final_stage,
+        )
 
-        final_remaining = _final_remaining_from_history(raw_remaining, latest, dt)
-        final_remaining = _cap_remaining_by_stage(accepted_stage, final_remaining)
-        status = make_status(accepted_stage, probs)
-
-        saved_row = None
-
-        if latest:
-            latest_dt = latest.captured_at
-            if latest_dt.tzinfo is None:
-                latest_dt = latest_dt.replace(tzinfo=timezone.utc)
-
-            diff_sec = abs((dt - latest_dt).total_seconds())
-
-            if diff_sec <= 60:
-                latest.captured_at = dt
-                latest.temperature = float(temperature)
-                latest.humidity = float(humidity)
-                latest.stage = accepted_stage
-                latest.status = status
-                latest.remaining_days = float(final_remaining)
-                latest.p_fresh = float(probs["fresh"])
-                latest.p_slightly_aged = float(probs["slightly_aged"])
-                latest.p_near_spoilage = float(probs["near_spoilage"])
-                latest.p_spoiled = float(probs["spoiled"])
-                latest.image_url = image_url
-                latest.sim_source_image = sim_source_image
-
-                session.add(latest)
-                session.commit()
-                session.refresh(latest)
-                saved_row = latest
-            else:
-                row = SpoilagePrediction(
-                    plant_id=plant_id,
-                    captured_at=dt,
-                    temperature=float(temperature),
-                    humidity=float(humidity),
-                    stage=accepted_stage,
-                    status=status,
-                    remaining_days=float(final_remaining),
-                    p_fresh=float(probs["fresh"]),
-                    p_slightly_aged=float(probs["slightly_aged"]),
-                    p_near_spoilage=float(probs["near_spoilage"]),
-                    p_spoiled=float(probs["spoiled"]),
-                    image_url=image_url,
-                    sim_source_image=sim_source_image,
-                )
-                session.add(row)
-                session.commit()
-                session.refresh(row)
-                saved_row = row
-        else:
-            row = SpoilagePrediction(
-                plant_id=plant_id,
-                captured_at=dt,
-                temperature=float(temperature),
-                humidity=float(humidity),
-                stage=accepted_stage,
-                status=status,
-                remaining_days=float(final_remaining),
-                p_fresh=float(probs["fresh"]),
-                p_slightly_aged=float(probs["slightly_aged"]),
-                p_near_spoilage=float(probs["near_spoilage"]),
-                p_spoiled=float(probs["spoiled"]),
-                image_url=image_url,
-                sim_source_image=sim_source_image,
-            )
-            session.add(row)
-            session.commit()
-            session.refresh(row)
-            saved_row = row
-
-        if saved_row:
-            captured_at = saved_row.captured_at.isoformat()
-
-            _create_alert_if_needed(
-                session=session,
-                plant_id=plant_id,
-                prediction_id=saved_row.id,
-                previous_stage=previous_stage,
-                current_stage=accepted_stage,
-            )
+        final_captured_at = saved_row.captured_at.isoformat()
 
     except Exception as e:
         session.rollback()
         print("DB insert/update failed:", e)
-        final_remaining = _cap_remaining_by_stage(accepted_stage, final_remaining)
-        status = make_status(accepted_stage, probs)
+        final_captured_at = captured_dt.isoformat()
 
     return SpoilagePredictResponse(
         plant_id=plant_id,
-        captured_at=captured_at,
-        stage=accepted_stage,
+        captured_at=final_captured_at,
+        stage=final_stage,
         stage_probs=StageProbs(**probs),
         remaining_days=float(final_remaining),
-        status=status,
+        status=final_status,
     )
 
 
@@ -374,32 +347,21 @@ async def spoilage_stage_only(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    dt = _parse_dt_or_now(captured_at)
-    captured_at = dt.isoformat()
+    captured_dt = _parse_dt_or_now(captured_at)
 
     try:
-        raw_stage, probs = clf.predict(img_bytes, temperature, humidity)
+        final_stage, probs = clf.predict(img_bytes, temperature, humidity)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    latest_stmt = (
-        select(SpoilagePrediction)
-        .where(SpoilagePrediction.plant_id == plant_id)
-        .order_by(SpoilagePrediction.captured_at.desc())
-        .limit(1)
-    )
-    latest = session.exec(latest_stmt).first()
-
-    previous_stage = latest.stage if latest else None
-    accepted_stage = _prevent_stage_regression(previous_stage, raw_stage)
-    status = make_status(accepted_stage, probs)
+    final_status = make_status(final_stage, probs)
 
     return StageOnlyResponse(
         plant_id=plant_id,
-        captured_at=captured_at,
-        stage=accepted_stage,
+        captured_at=captured_dt.isoformat(),
+        stage=final_stage,
         stage_probs=StageProbs(**probs),
-        status=status,
+        status=final_status,
     )
 
 
