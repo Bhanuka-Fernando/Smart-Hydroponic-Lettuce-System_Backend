@@ -48,7 +48,7 @@ def compute_health_score(probs: dict, tip: dict):
         primary_issue = "Healthy"
         driver = "classifier"
 
-    if health >= 80:
+    if health >= 70:
         status = "OK"
     elif health >= 60:
         status = "WATCH"
