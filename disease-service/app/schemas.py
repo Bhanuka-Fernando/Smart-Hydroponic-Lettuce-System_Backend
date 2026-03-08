@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 
 class TipburnOut(BaseModel):
     num_boxes: int
@@ -14,23 +14,41 @@ class PredictResponse(BaseModel):
     health_score: int
     status: str
     main_issue: str
+
     risk_cls: float
     risk_tip: float
     risk_total: float
+
     tipburn_present: bool
     tipburn_A: float
     tipburn_C: float
     tipburn_A_cap: float
 
+    image_name: Optional[str] = None
+    image_path: Optional[str] = None
+    reason: Optional[str] = None
+    classification_label: Optional[str] = None
+    classification_confidence: Optional[float] = None
+
 class LogCreate(BaseModel):
-    plant_id: str
-    captured_at: str
+    plant_id: Optional[str] = None
+    captured_at: Optional[str] = None
+
     health_score: int
     status: str
     main_issue: str
+
     probs: Dict[str, float]
     tipburn: Dict[str, Any]
+
     image_name: Optional[str] = None
+    image_path: Optional[str] = None
+
+    reason: Optional[str] = None
+    classification_label: Optional[str] = None
+    classification_confidence: Optional[float] = None
+
+    raw_result: Optional[Dict[str, Any]] = None
 
 class LogItem(BaseModel):
     id: int
@@ -39,7 +57,13 @@ class LogItem(BaseModel):
     health_score: int
     status: str
     main_issue: str
+
     image_name: Optional[str] = None
+    image_path: Optional[str] = None
+
+    reason: Optional[str] = None
+    classification_label: Optional[str] = None
+    classification_confidence: Optional[float] = None
 
 class RecentActivityItem(LogItem):
     pass

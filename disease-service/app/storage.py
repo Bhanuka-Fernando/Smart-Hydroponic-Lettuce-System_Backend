@@ -17,6 +17,11 @@ def insert_log(payload: LogCreate) -> int:
             probs_json=json.dumps(payload.probs),
             tipburn_json=json.dumps(payload.tipburn),
             image_name=payload.image_name,
+            image_path=payload.image_path,
+            reason=payload.reason,
+            classification_label=payload.classification_label,
+            classification_confidence=payload.classification_confidence,
+            raw_result_json=json.dumps(payload.raw_result) if payload.raw_result else None,
         )
         db.add(row)
         db.commit()
@@ -44,6 +49,10 @@ def get_logs_for_plant(plant_id: str, limit: int = 50) -> List[LogItem]:
                 status=r.status,
                 main_issue=r.main_issue,
                 image_name=r.image_name,
+                image_path=r.image_path,
+                reason=r.reason,
+                classification_label=r.classification_label,
+                classification_confidence=r.classification_confidence,
             )
             for r in rows
         ]
@@ -70,6 +79,13 @@ def get_latest_for_plant(plant_id: str) -> Optional[dict]:
             "status": r.status,
             "main_issue": r.main_issue,
             "image_name": r.image_name,
+            "image_path": r.image_path,
+            "reason": r.reason,
+            "classification_label": r.classification_label,
+            "classification_confidence": r.classification_confidence,
+            "probs": json.loads(r.probs_json) if r.probs_json else {},
+            "tipburn": json.loads(r.tipburn_json) if r.tipburn_json else {},
+            "raw_result": json.loads(r.raw_result_json) if r.raw_result_json else None,
         }
     finally:
         db.close()
@@ -93,8 +109,38 @@ def get_critical_recent(limit: int = 5) -> List[RecentActivityItem]:
                 status=r.status,
                 main_issue=r.main_issue,
                 image_name=r.image_name,
+                image_path=r.image_path,
+                reason=r.reason,
+                classification_label=r.classification_label,
+                classification_confidence=r.classification_confidence,
             )
             for r in rows
         ]
+    finally:
+        db.close()
+
+def get_log_by_id(log_id: int) -> Optional[dict]:
+    db = SessionLocal()
+    try:
+        r = db.query(ScanLog).filter(ScanLog.id == log_id).first()
+        if not r:
+            return None
+
+        return {
+            "id": r.id,
+            "plant_id": r.plant_id,
+            "captured_at": r.captured_at,
+            "health_score": r.health_score,
+            "status": r.status,
+            "main_issue": r.main_issue,
+            "image_name": r.image_name,
+            "image_path": r.image_path,
+            "reason": r.reason,
+            "classification_label": r.classification_label,
+            "classification_confidence": r.classification_confidence,
+            "probs": json.loads(r.probs_json) if r.probs_json else {},
+            "tipburn": json.loads(r.tipburn_json) if r.tipburn_json else {},
+            "raw_result": json.loads(r.raw_result_json) if r.raw_result_json else None,
+        }
     finally:
         db.close()
