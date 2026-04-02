@@ -25,46 +25,39 @@ def compute_tipburn_risk(tip: dict):
 
 
 def compute_health_score(probs: dict, tip: dict):
-    # --- classification summary ---
     cls_label = max(probs.keys(), key=lambda k: float(probs.get(k, 0.0)))
     cls_conf = float(probs.get(cls_label, 0.0))
     p_healthy = float(probs.get("Healthy", 0.0))
 
-    # --- risks ---
     risk_cls = 1.0 - p_healthy
     tip_calc = compute_tipburn_risk(tip)
     risk_tip = tip_calc["risk_tip"]
 
-    # --- score ---
     risk_total = 0.70 * risk_cls + 0.30 * risk_tip
     health = round(100 * (1 - risk_total))
     health = int(clamp(health, 0, 100))
 
-    # --- decide primary issue (farmer-facing) ---
-    # ✅ Always surface tipburn if present
+    # Farmer-facing issue selection
     if tip_calc["tipburn_present"]:
         primary_issue = "Tipburn"
         driver = "tipburn"
-    elif cls_label != "Healthy" and cls_conf >= 0.45:
+    elif cls_label != "Healthy" and p_healthy < 0.50:
         primary_issue = cls_label
         driver = "classifier"
     else:
         primary_issue = "Healthy"
         driver = "classifier"
 
-    # --- status ---
-    if health >= 80:
+    if health >= 70:
         status = "OK"
     elif health >= 60:
         status = "WATCH"
     else:
         status = "ACT NOW"
 
-    # soften alert when classifier is healthy & tipburn is minor
     if primary_issue == "Tipburn" and tip_calc["A_cap"] < 0.20 and tip_calc["C"] < 0.60:
         status = "WATCH"
 
-    # --- explanation text ---
     top3 = sorted(probs.items(), key=lambda x: -float(x[1]))[:3]
     reason = (
         f"Primary driver: {driver}. "
@@ -77,18 +70,15 @@ def compute_health_score(probs: dict, tip: dict):
     return {
         "health_score": health,
         "status": status,
-
         "classification_label": cls_label,
         "classification_confidence": cls_conf,
         "primary_issue": primary_issue,
         "decision_driver": driver,
         "reason": reason,
-
         "risk_cls": float(clamp(risk_cls, 0, 1)),
         "risk_tip": float(clamp(risk_tip, 0, 1)),
         "risk_total": float(clamp(risk_total, 0, 1)),
         "top3_probs": {k: float(v) for k, v in top3},
-
         "tipburn_present": tip_calc["tipburn_present"],
         "tipburn_A": tip_calc["A"],
         "tipburn_C": tip_calc["C"],

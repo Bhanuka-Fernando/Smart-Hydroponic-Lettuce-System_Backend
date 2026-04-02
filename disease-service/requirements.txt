@@ -8,3 +8,6 @@ torch
 torchvision
 timm
 ultralytics
+sqlalchemy
+psycopg2-binary
+pydantic-settings
