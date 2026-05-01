@@ -11,6 +11,7 @@ This project is now organized as five Dockerized FastAPI services plus one share
 | Spoilage ML service | `http://localhost:8002` | `8000` |
 | Water quality ML service | `http://localhost:8003` | `8000` |
 | Weight estimation and growth forecasting | `http://localhost:8004` | `8000` |
+| Virtual device simulator | `http://localhost:8010` | `8010` |
 | PostgreSQL | `localhost:5432` | `5432` |
 
 PostgreSQL creates these databases on first startup:
@@ -67,6 +68,7 @@ curl http://localhost:8001/health
 curl http://localhost:8002/health
 curl http://localhost:8003/health
 curl http://localhost:8004/health
+curl http://localhost:8010/device/health
 ```
 
 ## Important Configuration
@@ -126,3 +128,5 @@ docker compose up water-quality-ml-service
 Replace `water-quality-ml-service` with any service name from `docker-compose.yml`.
 
 If a build fails with `Temporary failure in name resolution` or `ReadTimeoutError`, rerun the same build command. Docker will reuse completed layers, so it usually resumes from the failed service instead of starting from zero.
+
+The PyTorch services pin `torch==2.2.2` and `torchvision==0.17.2` intentionally. Leaving these unpinned can make Linux ARM builds pull large CUDA/NVIDIA packages that are not useful for local CPU-only Docker runs on a Mac. The disease service uses a newer Ultralytics release because its YOLO model references newer modules such as `A2C2f`.

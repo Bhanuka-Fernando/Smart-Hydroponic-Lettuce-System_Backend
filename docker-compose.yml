@@ -111,6 +111,15 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  virtual-device-service:
+    build:
+      context: ./weight_estimation_growth_forecasting
+    container_name: hydroponic-virtual-device-service
+    command: ["uvicorn", "virtual_device_service.main:app", "--host", "0.0.0.0", "--port", "8010"]
+    ports:
+      - "8010:8010"
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   auth_static:

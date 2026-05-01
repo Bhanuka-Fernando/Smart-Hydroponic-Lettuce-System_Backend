@@ -4,11 +4,11 @@ python-multipart
 python-dotenv
 pillow
 pillow-heif
-numpy
-torch
-torchvision
-timm
-ultralytics
+numpy==1.26.4
+torch==2.2.2
+torchvision==0.17.2
+timm==1.0.12
+ultralytics==8.4.38
 sqlalchemy
 psycopg2-binary
 pydantic-settings

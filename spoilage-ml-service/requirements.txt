@@ -3,6 +3,7 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 pydantic-settings==2.7.1
 PyJWT==2.10.1
+sqlmodel==0.0.27
 
 numpy==1.26.4
 Pillow==10.4.0
