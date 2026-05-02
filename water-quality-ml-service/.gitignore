@@ -3,3 +3,13 @@ __pycache__/
 *.pyc
 app.db
 .env
+
+.DS_Store
+
+# ML model artifacts
+water-quality-ml-service/artifacts/*.joblib
+water-quality-ml-service/artifacts/*.pkl
+water-quality-ml-service/artifacts/*.pt
+water-quality-ml-service/artifacts/*.pth
+water-quality-ml-service/artifacts/*.h5
+water-quality-ml-service/artifacts/*.keras

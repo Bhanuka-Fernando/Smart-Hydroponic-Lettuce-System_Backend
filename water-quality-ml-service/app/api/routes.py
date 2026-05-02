@@ -24,10 +24,11 @@ from app.services.features import build_feature_frame, latest_feature_row, get_t
 from app.services.rules import (
     water_rule_checks,
     algae_reasoning,
-    health_score_from_severity,
     pick_main_reason_action,
 )
-from app.services.postprocess import confidence_gate_ml, worst_status, sensor_quality_checks
+from app.services.postprocess import confidence_gate_ml, worst_status, sensor_quality_checks, gate_water_probs
+from app.services.health_score import compute_health_score
+from app.services.final_decision import final_status_from_combined
 
 router = APIRouter(prefix="/water", tags=["water"])
 
@@ -125,6 +126,31 @@ def history(
     return HistoryResponse(tank_id=tank_id, count=len(out), readings=out)
 
 
+# ✅ NEW: Delete history endpoint (safe)
+@router.delete("/history")
+def delete_history(
+    tank_id: Optional[str] = Query(default=None, description="Delete only this tank if provided"),
+    confirm: bool = Query(default=False, description="Must be true to delete ALL tanks"),
+    db: Session = Depends(get_db),
+):
+    # Safety: require explicit confirmation for delete-all
+    if tank_id is None and not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="To delete ALL history, pass confirm=true. Or pass tank_id to delete one tank.",
+        )
+
+    q = db.query(WaterReading)
+    if tank_id is not None:
+        q = q.filter(WaterReading.tank_id == tank_id)
+
+    deleted = q.delete(synchronize_session=False)
+    db.commit()
+
+    scope = f"tank_id={tank_id}" if tank_id else "ALL"
+    return {"deleted": deleted, "scope": scope}
+
+
 def rows_from_db(tank_id: str, db: Session, minutes: int) -> List[tuple]:
     now = datetime.now(timezone.utc)
     start = now - pd.Timedelta(minutes=minutes)
@@ -182,18 +208,34 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
     sensor_quality, sensor_notes = sensor_quality_checks(req.ph, req.temp_c, req.turb_ntu, req.ec)
 
     rule_status, sev, reasons, actions = water_rule_checks(req.ph, req.temp_c, req.turb_ntu, req.ec, turb_d2)
-    health_score = health_score_from_severity(sev, reasons)
+
+    gated_probs = gate_water_probs(ml_status, ml_probs, sensor_quality)
+    ml_conf = max(gated_probs.values()) if gated_probs else None
+
+    health_score, score_breakdown = compute_health_score(
+        ph=float(req.ph),
+        temp_c=float(req.temp_c),
+        turb_ntu=float(req.turb_ntu),
+        ec=float(req.ec),
+        turb_d2=turb_d2,
+        ml_conf=ml_conf,
+    )
+
     score_status = rule_status
 
-    ml_status_gated = confidence_gate_ml(ml_status, ml_probs, sensor_quality)
-    final_status = worst_status(rule_status, ml_status_gated)
+    # combine decision
+    final_status, final_sev = final_status_from_combined(
+        rule_status=rule_status,
+        water_probs=gated_probs,
+        algae_probs=ml_algae_probs,
+        health_score=health_score,
+    )
 
     if final_status != rule_status and len(reasons) == 0:
         reasons = ["Detected risky pattern from recent sensor trends"]
         actions = ["Recheck sensors and inspect the system"]
 
     algae_reasons, algae_actions = algae_reasoning(req.turb_ntu, turb_d2, req.temp_c, req.ec, req.ph)
-
     main_reason, main_action = pick_main_reason_action(reasons, actions)
 
     return AnalyzeResponse(
@@ -221,6 +263,8 @@ def analyze(req: AnalyzeRequest, db: Session = Depends(get_db)):
             "resample_rule": settings.resample_rule,
             "resampled_points": int(len(df_feat)),
             "turb_delta_30min": turb_d2,
+            "final_severity_score": round(float(final_sev), 4),
+            "score_breakdown": score_breakdown,
         },
     )
 
@@ -237,7 +281,10 @@ def analyze_batch(req: AnalyzeBatchRequest):
     df_feat = build_feature_frame(rows, settings.resample_rule)
     x = latest_feature_row(df_feat, predictor.feature_cols)
     if x is None:
-        raise HTTPException(status_code=400, detail="Not enough readings for rolling features. Provide at least ~1 hour of data.")
+        raise HTTPException(
+            status_code=400,
+            detail="Not enough readings for rolling features. Provide at least ~1 hour of data.",
+        )
 
     ml_status, ml_probs, ml_algae, ml_algae_probs = predictor.predict(x)
 
@@ -247,21 +294,43 @@ def analyze_batch(req: AnalyzeBatchRequest):
     sensor_quality, sensor_notes = sensor_quality_checks(last_raw.ph, last_raw.temp_c, last_raw.turb_ntu, last_raw.ec)
 
     rule_status, sev, reasons, actions = water_rule_checks(last_raw.ph, last_raw.temp_c, last_raw.turb_ntu, last_raw.ec, turb_d2)
-    health_score = health_score_from_severity(sev, reasons)
+
+    gated_probs = gate_water_probs(ml_status, ml_probs, sensor_quality)
+    ml_conf = max(gated_probs.values()) if gated_probs else None
+
+    health_score, score_breakdown = compute_health_score(
+        ph=float(last_raw.ph),
+        temp_c=float(last_raw.temp_c),
+        turb_ntu=float(last_raw.turb_ntu),
+        ec=float(last_raw.ec),
+        turb_d2=turb_d2,
+        ml_conf=ml_conf,
+    )
+
     score_status = rule_status
 
-    ml_status_gated = confidence_gate_ml(ml_status, ml_probs, sensor_quality)
-    final_status = worst_status(rule_status, ml_status_gated)
+    final_status, final_sev = final_status_from_combined(
+        rule_status=rule_status,
+        water_probs=gated_probs,
+        algae_probs=ml_algae_probs,
+        health_score=health_score,
+    )
 
     if final_status != rule_status and len(reasons) == 0:
         reasons = ["Detected risky pattern from recent sensor trends"]
         actions = ["Recheck sensors and inspect the system"]
 
     algae_reasons, algae_actions = algae_reasoning(last_raw.turb_ntu, turb_d2, last_raw.temp_c, last_raw.ec, last_raw.ph)
-
     main_reason, main_action = pick_main_reason_action(reasons, actions)
 
-    latest_time = df_feat["timestamp"].iloc[-1].to_pydatetime().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    latest_time = (
+        df_feat["timestamp"]
+        .iloc[-1]
+        .to_pydatetime()
+        .replace(tzinfo=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
     return AnalyzeResponse(
         tank_id=tank_id,
@@ -287,5 +356,7 @@ def analyze_batch(req: AnalyzeBatchRequest):
             "resample_rule": settings.resample_rule,
             "resampled_points": int(len(df_feat)),
             "turb_delta_30min": turb_d2,
+            "final_severity_score": round(float(final_sev), 4),
+            "score_breakdown": score_breakdown,
         },
     )
