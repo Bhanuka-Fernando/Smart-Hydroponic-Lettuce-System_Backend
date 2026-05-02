@@ -109,6 +109,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      virtual-device-service:
+        condition: service_started
     restart: unless-stopped
 
   virtual-device-service:
